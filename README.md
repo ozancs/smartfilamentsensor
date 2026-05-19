@@ -4,7 +4,7 @@
 
 High-precision filament motion sensor for 3D printers. Uses an **ESP32-C3** and **AS5600** magnetic encoder to track filament movement at sub-millimeter accuracy. Detects clogs, runouts, and slippage in real-time with native **Klipper** integration.
 
-> **Build video coming soon** — in the meantime, use the [interactive CAD model](https://a360.co/4fwGLLL) and 3MF print files for assembly reference.
+> **Build video coming soon** — in the meantime, follow the **[Installation Guide](INSTALLATION_GUIDE.md)** and use the [interactive CAD model](https://a360.co/4fwGLLL) for reference.
 
 ---
 
