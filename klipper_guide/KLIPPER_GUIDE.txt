@@ -1,0 +1,200 @@
+===============================================================================
+  SMART FILAMENT SENSOR (SFS) — Klipper Integration Guide
+===============================================================================
+
+  ESP32 + AS5600 encoder based filament sensor with native Klipper module.
+  ESP32 only measures filament movement. All clog detection logic runs
+  inside Klipper.
+
+
+===============================================================================
+  1. INSTALLATION
+===============================================================================
+
+  Step 1 — Copy the module:
+
+    cp smart_filament_sensor.py ~/klipper/klippy/extras/
+
+  Step 2 — Add to printer.cfg:
+
+    [smart_filament_sensor my_sensor]
+    serial: /dev/ttyUSB0
+    baud: 115200
+    detection_length: 7.0
+    tolerance: 2.0
+    pause_on_clog: True
+    clog_gcode: PAUSE
+
+  Step 3 — Restart Klipper:
+
+    sudo systemctl restart klipper
+
+
+===============================================================================
+  2. CONFIG PARAMETERS
+===============================================================================
+
+  serial              ESP32 serial port (e.g. /dev/ttyUSB0, /dev/ttyACM0)
+  baud                Baud rate, must match ESP32 firmware (default: 115200)
+  detection_length    mm of extrusion between each clog check (default: 7.0)
+  tolerance           max allowed deviation in mm before clog (default: 2.0)
+  pause_on_clog       automatically pause on detection (default: True)
+  clog_gcode          gcode to run on clog (default: PAUSE)
+
+  Example — detection_length=7.0, tolerance=2.0:
+    Klipper extrudes 7mm, ESP32 encoder measures 4.8mm
+    Deviation = |7.0 - 4.8| = 2.2mm > 2.0mm tolerance
+    Result: CLOG DETECTED -> PAUSE
+
+
+===============================================================================
+  3. GCODE COMMANDS
+===============================================================================
+
+  ── Clog Detection ──────────────────────────────────────────────────────
+
+  SFS_STATUS
+      Show current sensor state: enabled, printing, detection window,
+      mm since last check.
+
+  SFS_ENABLE
+      Enable clog detection. Resets odometer and re-syncs extruder
+      position. Use after RESUME or filament change.
+
+  SFS_DISABLE
+      Disable clog detection without disconnecting the sensor.
+      Useful during maintenance, filament loading, or calibration.
+
+  SFS_RESET
+      Re-sync Klipper extruder position with ESP32 odometer.
+      Use if you suspect the counters drifted (e.g. after a manual
+      filament push).
+
+  ── Calibration ─────────────────────────────────────────────────────────
+
+  SFS_CALIBRATE [LENGTH=10]
+      Start encoder calibration. ESP32 enters calibration mode and
+      begins tracking filament movement.
+
+      LENGTH = how many mm of filament you will push/extrude.
+      Default: 10mm. For best accuracy, use 50-100mm.
+
+      After the filament stops moving, ESP32 waits 5 seconds then
+      auto-calculates and saves the new calibration factor.
+
+  SFS_CALIBRATE_APPLY
+      Force-save the calibration result immediately without waiting
+      for the 5-second idle timeout.
+
+  SFS_CALIBRATE_STOP
+      Cancel the active calibration without saving.
+
+  ── ESP32 Settings ──────────────────────────────────────────────────────
+
+  SFS_SET [SENS=<1-50>] [NOISE=<1-20>] [BRIGHT=<1-255>] [DIR=<1/-1>] [CAL=<float>]
+
+      Set one or more ESP32 parameters. All parameters are optional
+      and can be combined freely. Values are saved to ESP32 NVS flash
+      and persist across power cycles.
+
+      SENS    Movement sensitivity — minimum encoder steps to register
+              filament motion. Higher = less sensitive. (default: 5)
+
+      NOISE   Noise filter deadband — encoder jitter below this is
+              ignored. Higher = more filtering. (default: 3)
+
+      BRIGHT  WS2812B status LED brightness. (default: 50)
+
+      DIR     Encoder direction multiplier. Set to -1 if the sensor
+              reads negative when filament feeds forward. (default: 1)
+
+      CAL     Calibration factor in degrees per mm. Normally set by
+              SFS_CALIBRATE, but can be overridden manually. (default: 12.5)
+
+  Examples:
+      SFS_SET BRIGHT=10
+      SFS_SET SENS=3 NOISE=2
+      SFS_SET BRIGHT=80 DIR=-1 CAL=11.2345
+
+
+===============================================================================
+  4. CALIBRATION WALKTHROUGH
+===============================================================================
+
+  From Klipper console (Mainsail / Fluidd / KlipperScreen):
+
+    1.  SFS_CALIBRATE LENGTH=50       ; start calibration, target 50mm
+    2.  G1 E50 F100                   ; extrude 50mm slowly
+    3.  ; Wait 5 seconds...           ; ESP32 auto-saves
+        ; or: SFS_CALIBRATE_APPLY     ; save immediately
+
+  The new calibration factor appears in the Klipper console:
+    >>> CALIBRATION SUCCESS!
+    >>> Measured: 49.82 mm | Target: 50.0 mm
+    >>> New Cal Factor: 12.3456 deg/mm (saved)
+
+  Tips:
+    - Use a longer calibration length (50-100mm) for better accuracy
+    - Extrude slowly (F60-F100) for consistent results
+    - You can repeat calibration multiple times, each run refines further
+    - The cal factor is saved to ESP32 flash — survives power off
+
+
+===============================================================================
+  5. OPTIONAL PAUSE / RESUME MACROS
+===============================================================================
+
+  If you don't already have PAUSE/RESUME macros in your printer.cfg:
+
+    [gcode_macro PAUSE]
+    rename_existing: BASE_PAUSE
+    gcode:
+      SAVE_GCODE_STATE NAME=PAUSE_state
+      BASE_PAUSE
+      G91
+      G1 Z10 F600
+      G90
+      G1 X10 Y10 F6000
+      RESTORE_GCODE_STATE NAME=PAUSE_state
+
+    [gcode_macro RESUME]
+    rename_existing: BASE_RESUME
+    gcode:
+      BASE_RESUME
+
+
+===============================================================================
+  6. LED STATUS INDICATORS (on the ESP32 sensor board)
+===============================================================================
+
+  White breathing    Idle — no filament movement for 5+ seconds
+  LED off            Deep idle — no movement for 5+ minutes
+  Blue pulsing       Filament is moving
+  Solid green        Measure mode active
+  Solid yellow       Calibration mode active
+
+
+===============================================================================
+  7. TROUBLESHOOTING
+===============================================================================
+
+  "Cannot open serial port"
+    - Check that the ESP32 is connected and the port is correct
+    - Run: ls /dev/ttyUSB* /dev/ttyACM*
+    - Make sure no other process (screen, minicom) holds the port
+    - Add klipper user to dialout group: sudo usermod -aG dialout $USER
+
+  False clog detections
+    - Increase tolerance in printer.cfg (e.g. 3.0 or 4.0)
+    - Increase detection_length (e.g. 10.0 or 15.0)
+    - Re-calibrate with SFS_CALIBRATE LENGTH=100
+
+  No detection / never triggers
+    - Decrease tolerance (e.g. 1.0)
+    - Check SFS_STATUS — is detection enabled?
+    - Check calibration factor — run SFS_SET to verify
+
+  Encoder reads wrong direction
+    - SFS_SET DIR=-1
+
+===============================================================================
