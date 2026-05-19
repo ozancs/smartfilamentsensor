@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Filament Sensor - BOM</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            color: #2d3748;
+            background-color: #ffffff;
+            margin: 0;
+            padding: 40px;
+            line-height: 1.5;
+        }
+        .header {
+            border-bottom: 2px solid #e2e8f0;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 28px;
+            color: #1a202c;
+            font-weight: 700;
+        }
+        .header p {
+            margin: 5px 0 0 0;
+            color: #718096;
+            font-size: 14px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+        }
+        th {
+            background-color: #f7fafc;
+            color: #4a5568;
+            font-weight: 600;
+            text-align: left;
+            padding: 12px;
+            border-bottom: 2px solid #edf2f7;
+            font-size: 14px;
+        }
+        td {
+            padding: 15px 12px;
+            border-bottom: 1px solid #edf2f7;
+            font-size: 14px;
+            vertical-align: middle;
+        }
+        .img-container {
+            width: 60px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f8fafc;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            overflow: hidden;
+        }
+        .img-container img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        .qty {
+            font-weight: 600;
+            text-align: center;
+        }
+        .category-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .bg-elec { background-color: #e0f2fe; color: #0369a1; }
+        .bg-mech { background-color: #fef3c7; color: #b45309; }
+        .bg-hard { background-color: #f3f4f6; color: #4b5563; }
+        
+        @media print {
+            body { padding: 0; }
+            .no-print { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>Smart Filament Sensor</h1>
+        <p>Official Bill of Materials (BOM) & Component Specifications</p>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 80px;">Image</th>
+                <th style="width: 120px;">Category</th>
+                <th style="width: 220px;">Component Name</th>
+                <th style="width: 60px; text-align: center;">Qty</th>
+                <th>Description / Technical Details</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- ESP32-C3 -->
+            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://ae-pic-a1.aliexpress-media.com/kf/S9a3ff1fed6a343abaf43b483c8fbdd2fR.jpg?has_lang=1&ver=2" alt="ESP32-C3 Super Mini">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-elec">Electronics</span></td>
+                <strong><td>ESP32-C3 Super Mini</td></strong>
+                <td class="qty">1</td>
+                <td>Main microcontroller. WiFi/BLE enabled, ultra-compact form factor perfect for tight enclosures.</td>
+            </tr>
+            <!-- AS5600 -->
+            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://ae-pic-a1.aliexpress-media.com/kf/Sa852bac21ecb46f2a925596120a375f0l.jpg" alt="AS5600">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-elec">Electronics</span></td>
+                <strong><td>AS5600 Encoder Module</td></strong>
+                <td class="qty">1</td>
+                <td>Contactless magnetic rotary encoder. Must include a diametrical magnet for proper tracking.</td>
+            </tr>
+            <!-- NeoPixel -->
+            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://cdn-shop.adafruit.com/970x728/1612-04.jpg" alt="NeoPixel 5050">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-elec">Electronics</span></td>
+                <strong><td>WS2812B NeoPixel 5050</td></strong>
+                <td class="qty">1</td>
+                <td>RGB status indicator LED mounted on a single round breakout PCB.</td>
+            </tr>
+            <!-- Grooved Bearing -->
+            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://ae-pic-a1.aliexpress-media.com/kf/Safe44d44d6dc4c8dad7928db03f72246T.jpg" alt="Grooved Bearing">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-mech">Mechanical</span></td>
+                <strong><td>Grooved Bearing (U604ZZ)</td></strong>
+                <td class="qty">2</td>
+                <td>OD: 13mm, ID: 4mm. The central pulley/bearing that the filament rides on.</td>
+            </tr>
+            <!-- Dowel Pin -->
+            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://ae-pic-a1.aliexpress-media.com/kf/S10fdbc62bdd048f9a9554ebff6a91cf6n.jpg" alt="Dowel Pin">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-mech">Mechanical</span></td>
+                <strong><td>Dowel Pin (3mm x 15mm)</td></strong>
+                <td class="qty">1</td>
+                <td>Smooth hardened steel pin used as the main axle/shaft for the bearing.</td>
+            </tr>
+            <!-- O-Ring -->
+            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://ae-pic-a1.aliexpress-media.com/kf/S1ba9cd57e6e943999e7114e9483fa9aaN.png" alt="O-Ring">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-mech">Mechanical</span></td>
+                <strong><td>O-Ring / Seal Ring</td></strong>
+                <td class="qty">1</td>
+                <td>OD: ~11mm. Stretched over the grooved bearing to grip the filament securely.</td>
+            </tr>
+            <!-- Pneumatic Fitting -->
+            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://store.bblcdn.com/s4/default/50d34e8ddd294b5b89c2dc7b1e2cf7a7/FC001.png__op__resize,m_lfit,w_640__op__format,f_auto__op__quality,q_80" alt="PC4-M6">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-hard">Hardware</span></td>
+                <strong><td>PC4-M6 Fitting</td></strong>
+                <td class="qty">2</td>
+                <td>6mm thread pneumatic connectors used as entry and exit guides for Bowden/PTFE tubes.</td>
+            </tr>
+            <!-- Spring -->
+            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://ae01.alicdn.com/kf/H9ad1cc97ebac4506b3ca0d902ddf14e8F.jpg" alt="Spring">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-hard">Hardware</span></td>
+                <strong><td>Compression Spring</td></strong>
+                <td class="qty">1</td>
+                <td>Pen-style spring to maintain tension. Can be cut to length during final assembly.</td>
+            </tr>
+			            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://tr.farnell.com/productimages/large/en_GB/2400762-40.jpg" alt="screw">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-hard">Hardware</span></td>
+                <strong><td>M3 Screw</td></strong>
+                <td class="qty">1</td>
+                <td>M8x8 - M3x10 is enough</td>
+            </tr>
+						            <tr>
+                <td>
+                    <div class="img-container">
+                        <img src="https://ae-pic-a1.aliexpress-media.com/kf/S150b407f085148f39955caf1f4792f80w.jpg" alt="screw">
+                    </div>
+                </td>
+                <td><span class="category-badge bg-hard">Hardware</span></td>
+                <strong><td>M2 Self Tapping Screw</td></strong>
+                <td class="qty">1</td>
+                <td>Max 7mm deep for as5600, Max 4mm for securing esp32</td>
+            </tr>
+        </tbody>
+    </table>
+
+</body>
+</html>
