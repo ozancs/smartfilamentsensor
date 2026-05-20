@@ -168,11 +168,11 @@ After calibration, verify with the **Measure** mode — push a known length and 
 
 ## 7. Klipper Setup
 
-See the full [Klipper Integration Guide](klipper/KLIPPER_GUIDE.txt) for detailed instructions.
+See the full [Klipper Integration Guide](klipper_guide/KLIPPER_GUIDE.txt) for detailed instructions.
 
 Quick start:
 ```bash
-cp klipper/smart_filament_sensor.py ~/klipper/klippy/extras/
+cp klipper_guide/smart_filament_sensor.py ~/klipper/klippy/extras/
 sudo systemctl restart klipper
 ```
 
@@ -181,10 +181,12 @@ Add to `printer.cfg`:
 [smart_filament_sensor my_sensor]
 serial: /dev/ttyUSB0
 baud: 115200
-detection_length: 7.0
-tolerance: 2.0
+detection_length: 7.0        # mm between clog checks
+tolerance: 2.0                # max deviation before clog
 pause_on_clog: True
 clog_gcode: PAUSE
+underextrusion_period: 10.0   # seconds to average underextrusion rate
+health_check_interval: 30.0   # seconds between magnet health checks
 ```
 
 ---
@@ -200,3 +202,5 @@ clog_gcode: PAUSE
 | Spring too stiff | Trim the compression spring shorter. |
 | PTFE fittings loose | Wrap thread tape around the fitting threads. |
 | Wires caught in mechanism | Re-route wires away from the spring arm, re-close back cover. |
+| "Sensor disconnected" warning in Klipper | Check USB cable, try a different port. Sensor auto-reconnects when restored. |
+| False clog during homing | Update to v2.2 — homing awareness automatically pauses detection during homing moves. |

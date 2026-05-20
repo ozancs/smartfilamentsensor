@@ -8,7 +8,7 @@
 #define SCL_PIN 5
 #define NEO_PIN 2
 #define NUM_LEDS 1
-#define FW_VERSION "2.1.0"
+#define FW_VERSION "2.2.0"
 
 Preferences prefs;
 AS5600 as5600;
@@ -123,6 +123,7 @@ void printHelp() {
     Serial.println("║  GET_MM          Get odometer mm since last reset     ║");
     Serial.println("║  GET_MM_RESET    Get mm and atomically reset counter  ║");
     Serial.println("║  RESET_MM        Reset odometer counter               ║");
+    Serial.println("║  HEALTH          Report magnet health (ok/weak/strong)║");
     Serial.println("║                                                     ║");
     Serial.println("║  SETTINGS:                                          ║");
     Serial.println("║  ─────────────────────────────────────────────────  ║");
@@ -214,9 +215,8 @@ void setup() {
         Serial.println(">>> WARNING: No magnet detected! Check sensor positioning.");
     } else {
         uint8_t agc = as5600.readAGC();
-        if (agc < 40) Serial.println(">>> WARNING: Magnet too strong! Move it further away.");
-        else if (agc > 200) Serial.println(">>> WARNING: Magnet too weak! Move it closer.");
-        else Serial.println(">>> Magnet OK.");
+        if (agc > 240) Serial.println(">>> WARNING: Magnet too weak! Move it closer.");
+        else Serial.printf(">>> Magnet OK (AGC: %d)\n", agc);
     }
     Serial.println(">>> Type 'HELP' or '?' for commands.\n");
 }
@@ -255,6 +255,20 @@ void loop() {
             double measured = calculateDistance(global_steps - odometer_reset_steps);
             odometer_reset_steps = global_steps;
             Serial.printf("MM:%.4f\n", measured);
+        }
+        else if (upperInput == "HEALTH") {
+            // Report magnet health for Klipper monitoring
+            // AGC 0 = fully saturated (too strong), AGC 255 = no signal (too weak)
+            // AS5600 auto-adjusts gain — only extremes are actual problems
+            bool detected = as5600.detectMagnet();
+            uint8_t agc = as5600.readAGC();
+            if (!detected) {
+                Serial.println("HEALTH:no_magnet");
+            } else if (agc > 240) {
+                Serial.println("HEALTH:too_weak");
+            } else {
+                Serial.printf("HEALTH:ok:%d\n", agc);
+            }
         }
         else if (upperInput == "APPLY") {
             if (test_active) {

@@ -1,5 +1,5 @@
 ===============================================================================
-  SMART FILAMENT SENSOR (SFS) — Klipper Integration Guide
+  SMART FILAMENT SENSOR (SFS) — Klipper Integration Guide v2.2
 ===============================================================================
 
   ESP32 + AS5600 encoder based filament sensor with native Klipper module.
@@ -24,6 +24,8 @@
     tolerance: 2.0
     pause_on_clog: True
     clog_gcode: PAUSE
+    underextrusion_period: 10.0
+    health_check_interval: 30.0
 
   Step 3 — Restart Klipper:
 
@@ -40,6 +42,8 @@
   tolerance           max allowed deviation in mm before clog (default: 2.0)
   pause_on_clog       automatically pause on detection (default: True)
   clog_gcode          gcode to run on clog (default: PAUSE)
+  underextrusion_period  seconds to average underextrusion rate (default: 10.0)
+  health_check_interval  seconds between magnet health checks (default: 30.0)
 
   Example — detection_length=7.0, tolerance=2.0:
     Klipper extrudes 7mm, ESP32 encoder measures 4.8mm
@@ -54,7 +58,8 @@
   ── Clog Detection ──────────────────────────────────────────────────────
 
   SFS_STATUS
-      Show current sensor state: enabled, printing, detection window,
+      Show current sensor state: enabled, printing, homing status,
+      sensor connection, magnet health, underextrusion rate,
       mm since last check.
 
   SFS_ENABLE
@@ -67,6 +72,7 @@
 
   SFS_RESET
       Re-sync Klipper extruder position with ESP32 odometer.
+      Also clears underextrusion rate history.
       Use if you suspect the counters drifted (e.g. after a manual
       filament push).
 
@@ -164,7 +170,63 @@
 
 
 ===============================================================================
-  6. LED STATUS INDICATORS (on the ESP32 sensor board)
+  6. ADVANCED FEATURES (v2.2)
+===============================================================================
+
+  ── Underextrusion Rate ─────────────────────────────────────────────────
+
+  The module continuously tracks the ratio of actual vs. commanded
+  extrusion over a rolling time window (underextrusion_period).
+
+    underextrusion_rate = 0.0%  →  perfect extrusion
+    underextrusion_rate = 30%   →  30% underextrusion (partial clog)
+    underextrusion_rate = 100%  →  total clog / runout
+
+  This value is exposed to Moonraker via get_status() and can be
+  displayed on Mainsail/Fluidd dashboards.
+
+  ── Magnet Health Monitoring ────────────────────────────────────────────
+
+  Every health_check_interval seconds, the module queries the ESP32's
+  magnet state. If the magnet is not detected during a print, the
+  module warns the user. States:
+
+    ok          Magnet detected, AGC in healthy range
+    too_weak    Magnet detected but signal is weak (move closer)
+    too_strong  Magnet detected but signal is saturated (move further)
+    no_magnet   No magnet detected (critical — readings unreliable)
+
+  ── Sensor Connection Monitoring ────────────────────────────────────────
+
+  If no response is received from the ESP32 within 5 seconds, the
+  module marks the sensor as disconnected and warns the user.
+  The sensor automatically reconnects when communication resumes.
+
+  ── Homing Awareness ───────────────────────────────────────────────────
+
+  Clog detection is automatically paused during homing moves to
+  prevent false triggers. The odometer re-syncs after homing completes.
+
+  ── Moonraker / Dashboard Integration ──────────────────────────────────
+
+  The module exposes real-time data via get_status():
+
+    enabled              bool    clog detection on/off
+    sensor_connected     bool    ESP32 communication status
+    magnet_state         string  ok / too_weak / too_strong / no_magnet
+    magnet_agc           int     raw AGC value (0-255)
+    underextrusion_rate  float   0.0 (perfect) to 1.0 (total clog)
+    detection_length     float   mm between checks
+    tolerance            float   mm deviation threshold
+    is_printing          bool    print state
+    is_homing            bool    homing in progress
+
+  These values update in real-time and can be used in Mainsail/Fluidd
+  dashboard widgets or custom macros.
+
+
+===============================================================================
+  7. LED STATUS INDICATORS (on the ESP32 sensor board)
 ===============================================================================
 
   White breathing    Idle — no filament movement for 5+ seconds
@@ -175,7 +237,7 @@
 
 
 ===============================================================================
-  7. TROUBLESHOOTING
+  8. TROUBLESHOOTING
 ===============================================================================
 
   "Cannot open serial port"
@@ -184,14 +246,27 @@
     - Make sure no other process (screen, minicom) holds the port
     - Add klipper user to dialout group: sudo usermod -aG dialout $USER
 
+  "Sensor disconnected" warning
+    - Check USB cable connection
+    - Try a different USB port
+    - If using a USB hub, try connecting directly
+    - Check: ls /dev/ttyUSB* to verify the device is still present
+
+  "Magnet not detected" warning
+    - Check magnet is centered in the holder
+    - Verify AS5600 air gap is 1-2mm
+    - Check AGC value in SFS_STATUS — healthy range is 40-200
+
   False clog detections
     - Increase tolerance in printer.cfg (e.g. 3.0 or 4.0)
     - Increase detection_length (e.g. 10.0 or 15.0)
     - Re-calibrate with SFS_CALIBRATE LENGTH=100
+    - Check underextrusion_rate in SFS_STATUS for baseline
 
   No detection / never triggers
     - Decrease tolerance (e.g. 1.0)
     - Check SFS_STATUS — is detection enabled?
+    - Check sensor_connected status
     - Check calibration factor — run SFS_SET to verify
 
   Encoder reads wrong direction

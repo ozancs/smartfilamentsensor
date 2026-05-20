@@ -17,6 +17,11 @@ High-precision filament motion sensor for 3D printers. Uses an **ESP32-C3** and 
 - **Status LED** — WS2812B with smooth breathing/pulse animations (idle, moving, calibrating)
 - **Windows console app** — standalone .exe for calibration, live measurement, settings, and firmware flashing
 - **No drift** — absolute encoder, no step counting errors over time
+- **Underextrusion rate tracking** — rolling average of actual vs. commanded extrusion ratio, exposed to Moonraker dashboards
+- **Magnet health monitoring** — continuous AGC tracking, warns on weak/missing magnet during print
+- **Sensor connection watchdog** — detects USB disconnection, auto-reconnects, warns user
+- **Homing awareness** — automatically pauses detection during homing moves to prevent false triggers
+- **Moonraker/Dashboard integration** — `get_status()` exposes real-time sensor data to Mainsail/Fluidd
 
 ---
 
@@ -93,19 +98,21 @@ sudo systemctl restart klipper
 [smart_filament_sensor my_sensor]
 serial: /dev/ttyUSB0
 baud: 115200
-detection_length: 7.0   # mm of extrusion between each check
-tolerance: 2.0           # max allowed deviation (mm) before clog
+detection_length: 7.0        # mm of extrusion between each check
+tolerance: 2.0                # max allowed deviation (mm) before clog
 pause_on_clog: True
 clog_gcode: PAUSE
+underextrusion_period: 10.0   # seconds to average underextrusion rate
+health_check_interval: 30.0   # seconds between magnet health checks
 ```
 
 ### GCode Commands
 
 | Command | Description |
 |---|---|
-| `SFS_STATUS` | Show sensor state |
+| `SFS_STATUS` | Show sensor state, health, underextrusion rate |
 | `SFS_ENABLE` / `SFS_DISABLE` | Toggle clog detection |
-| `SFS_RESET` | Re-sync extruder position and odometer |
+| `SFS_RESET` | Re-sync extruder position, reset odometer & stats |
 | `SFS_CALIBRATE [LENGTH=50]` | Start calibration |
 | `SFS_CALIBRATE_APPLY` | Save calibration immediately |
 | `SFS_CALIBRATE_STOP` | Cancel calibration |
@@ -121,7 +128,7 @@ G1 E50 F100                ; extrude 50mm slowly
 SFS_CALIBRATE_APPLY        ; save immediately (or wait 5s for auto-save)
 ```
 
-Full guide: [`klipper/KLIPPER_GUIDE.txt`](klipper/KLIPPER_GUIDE.txt)
+Full guide: [`klipper_guide/KLIPPER_GUIDE.txt`](klipper_guide/KLIPPER_GUIDE.txt)
 
 ---
 
@@ -155,6 +162,24 @@ Deviation = |7.0 - 1.2| = 5.8mm > 2.0mm tolerance → PAUSE
 
 ---
 
+## Moonraker / Dashboard Data
+
+The Klipper module exposes real-time sensor data via `get_status()`, accessible from Mainsail, Fluidd, or custom macros:
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | bool | Clog detection on/off |
+| `sensor_connected` | bool | ESP32 communication status |
+| `magnet_state` | string | `ok` / `too_weak` / `too_strong` / `no_magnet` |
+| `magnet_agc` | int | Raw AGC value (0-255, healthy: 40-200) |
+| `underextrusion_rate` | float | 0.0 (perfect) to 1.0 (total clog) |
+| `detection_length` | float | mm between checks |
+| `tolerance` | float | mm deviation threshold |
+| `is_printing` | bool | Print state |
+| `is_homing` | bool | Homing in progress |
+
+---
+
 ## LED Status
 
 | LED State | Meaning |
@@ -170,19 +195,19 @@ Deviation = |7.0 - 1.2| = 5.8mm > 2.0mm tolerance → PAUSE
 ## Project Structure
 
 ```
-smart_filament_sensor/
-├── smart_filament_sensor.ino     # ESP32 firmware (Arduino)
-├── klipper/
-│   ├── smart_filament_sensor.py  # Klipper klippy module
+smartfilamentsensor/
+├── klipper_guide/
+│   ├── smart_filament_sensor.py  # Klipper klippy module (v2.2)
 │   └── KLIPPER_GUIDE.txt         # Full integration guide
-├── firmware/                     # Pre-built binaries for flashing
-├── console_app/                  # Electron desktop app source
 ├── 3d_print_files_and_bom/       # 3MF files + BOM
 │   ├── SmartFilament_Body_*.3mf
 │   ├── BackCover.3mf
 │   ├── MagnetHolder.3mf
 │   ├── Spring_Arm.3mf
 │   └── bom.html
+├── photos/                       # Build reference photos
+├── INSTALLATION_GUIDE.md         # Step-by-step assembly guide
+├── bom.html                      # Bill of Materials
 └── README.md
 ```
 
