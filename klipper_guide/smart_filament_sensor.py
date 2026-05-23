@@ -109,7 +109,9 @@ class SmartFilamentSensor:
         # Sensor connection tracking
         self._connected        = False
         self._last_response_time = 0.0
-        self._connection_timeout = 5.0  # seconds without response = disconnected
+        # Timeout must be > health_check_interval so we don't false-trigger
+        # between periodic HEALTH queries
+        self._connection_timeout = self.health_check_interval + 10.0
 
         # Magnet health tracking
         self._magnet_state     = 'unknown'  # ok, too_weak, too_strong, no_magnet
@@ -152,19 +154,27 @@ class SmartFilamentSensor:
         try:
             self._serial = serial.Serial(
                 self.serial_port, self.baud_rate, timeout=0.1)
+            self._connected = True
+            self._last_response_time = time.monotonic()
+            logging.info("SmartFilamentSensor '%s': connected to %s"
+                         % (self.name, self.serial_port))
+
+            self._reader_thread = threading.Thread(
+                target=self._serial_reader, daemon=True)
+            self._reader_thread.start()
+
+            # Ping sensor immediately so we get a response before first health check
+            self._send("HEALTH")
         except Exception as e:
-            raise self.printer.config_error(
-                "SmartFilamentSensor '%s': cannot open %s: %s"
+            logging.warning(
+                "SmartFilamentSensor '%s': cannot open %s: %s "
+                "(sensor will be detected when plugged in)"
                 % (self.name, self.serial_port, e))
-
-        self._connected = True
-        self._last_response_time = self.reactor.monotonic()
-        logging.info("SmartFilamentSensor '%s': connected to %s"
-                     % (self.name, self.serial_port))
-
-        self._reader_thread = threading.Thread(
-            target=self._serial_reader, daemon=True)
-        self._reader_thread.start()
+            self._connected = False
+            self.gcode.respond_info(
+                "SmartFilamentSensor '%s': sensor not found on %s. "
+                "Plug in the sensor and run FIRMWARE_RESTART."
+                % (self.name, self.serial_port))
 
         # Extrusion check timer (250ms for faster response)
         self.reactor.register_timer(
@@ -172,7 +182,7 @@ class SmartFilamentSensor:
 
         # Health check timer (magnet + connection monitoring)
         self.reactor.register_timer(
-            self._health_check, self.reactor.monotonic() + 5.0)
+            self._health_check, self.reactor.monotonic() + self.health_check_interval)
 
     def _handle_disconnect(self):
         if self._serial:
@@ -200,6 +210,12 @@ class SmartFilamentSensor:
                 except Exception as e:
                     logging.error("SmartFilamentSensor '%s': write error: %s"
                                   % (self.name, e))
+                    if self._connected:
+                        self._connected = False
+                        self.reactor.register_async_callback(
+                            lambda et: self.gcode.respond_info(
+                                "SmartFilamentSensor '%s': WARNING - sensor "
+                                "disconnected! (write error)" % self.name))
 
     def _serial_reader(self):
         while True:
@@ -427,6 +443,9 @@ class SmartFilamentSensor:
     # ── GCode Commands ───────────────────────────────────────────────────────
 
     def cmd_STATUS(self, gcmd):
+        # Check if serial port is still valid
+        if self._serial and not self._serial.is_open:
+            self._connected = False
         e     = self._get_e_pos()
         last  = self._last_e_pos or 0.0
         since = (e - last) if e is not None else 0.0
@@ -514,4 +533,7 @@ class SmartFilamentSensor:
 
 
 def load_config(config):
+    return SmartFilamentSensor(config)
+
+def load_config_prefix(config):
     return SmartFilamentSensor(config)

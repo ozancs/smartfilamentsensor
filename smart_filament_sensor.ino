@@ -419,7 +419,7 @@ void loop() {
             float current_mm = calculateDistance(rel_steps);
             
             // Log every 0.01mm change
-            if (fabs(current_mm - lastLoggedMm) >= 0.01f) {
+            if (fabs(current_mm - lastLoggedMm) >= 1.0f) {
                 Serial.printf("[%s] %.2f mm (Steps: %lld)\n", 
                              (test_active ? "CAL" : "MEA"), current_mm, rel_steps);
                 lastLoggedMm = current_mm;
