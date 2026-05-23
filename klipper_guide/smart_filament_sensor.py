@@ -57,9 +57,11 @@
 #     SFS_RESET           Re-sync extruder position and reset ESP32 odometer
 #
 #   Calibration:
-#     SFS_CALIBRATE [LENGTH=10] Start calibration. Extrude LENGTH mm of
-#                                  filament, then wait 5s for auto-save
-#                                  or run SFS_CALIBRATE_APPLY.
+#     SFS_AUTO_CALIBRATE [TEMP=200] [LENGTH=50] [SPEED=100]
+#                                  One-command calibration: heats hotend,
+#                                  extrudes, saves automatically.
+#     SFS_CALIBRATE [LENGTH=10] Manual calibration start. Extrude LENGTH mm
+#                                  then wait 5s or run SFS_CALIBRATE_APPLY.
 #     SFS_CALIBRATE_APPLY       Force-save calibration result immediately
 #     SFS_CALIBRATE_STOP        Cancel active calibration
 #
@@ -165,6 +167,8 @@ class SmartFilamentSensor:
             desc="Cancel active calibration")
         self.gcode.register_command('SFS_SET', self.cmd_SET,
             desc="Change ESP32 settings. Usage: SFS_SET [SENS=] [NOISE=] [BRIGHT=] [DIR=] [CAL=]")
+        self.gcode.register_command('SFS_AUTO_CALIBRATE', self.cmd_AUTO_CALIBRATE,
+            desc="Auto calibrate: heat, extrude, save. Usage: SFS_AUTO_CALIBRATE [TEMP=200] [LENGTH=50] [SPEED=100]")
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -776,6 +780,59 @@ class SmartFilamentSensor:
                 "SmartFilamentSensor '%s': no parameters given.\n"
                 "Usage: SFS_SET [SENS=] [NOISE=] [BRIGHT=] [DIR=] [CAL=]"
                 % self.name)
+
+    def cmd_AUTO_CALIBRATE(self, gcmd):
+        """One-command calibration: heat hotend, extrude, auto-save."""
+        if not self._require_connected(gcmd):
+            return
+        temp = gcmd.get_float('TEMP', 200., above=0.)
+        length = gcmd.get_float('LENGTH', 50., above=0.)
+        speed = gcmd.get_float('SPEED', 100., above=0.)  # mm/min
+
+        gcmd.respond_info(
+            "SmartFilamentSensor '%s': AUTO CALIBRATE\n"
+            "  Heating to %.0fC, then extruding %.0fmm at F%.0f\n"
+            "  Please wait..."
+            % (self.name, temp, length, speed))
+
+        try:
+            # Heat and wait
+            self.gcode.run_script_from_command(
+                "M109 S%.0f" % temp)
+
+            # Start calibration on ESP32
+            self._calibrating = True
+            self._send("START %.1f" % length)
+            gcmd.respond_info(
+                "SmartFilamentSensor '%s': hotend ready, extruding %.0fmm..."
+                % (self.name, length))
+
+            # Extrude (relative mode)
+            self.gcode.run_script_from_command("M83")
+            self.gcode.run_script_from_command(
+                "G1 E%.1f F%.0f" % (length, speed))
+
+            # Wait for filament to stop + auto-save (6s should be enough)
+            self.gcode.run_script_from_command("G4 P6000")
+
+            # If still calibrating (auto-save didn't trigger), force apply
+            if self._calibrating:
+                self._send("APPLY")
+                gcmd.respond_info(
+                    "SmartFilamentSensor '%s': extrusion complete, "
+                    "applying calibration..." % self.name)
+                # Give ESP32 time to process
+                self.gcode.run_script_from_command("G4 P2000")
+
+            gcmd.respond_info(
+                "SmartFilamentSensor '%s': auto calibration finished!\n"
+                "Check the result above. Run SFS_STATUS to verify."
+                % self.name)
+        except Exception as e:
+            self._calibrating = False
+            gcmd.respond_info(
+                "SmartFilamentSensor '%s': auto calibration failed: %s"
+                % (self.name, e))
 
 
 def load_config(config):

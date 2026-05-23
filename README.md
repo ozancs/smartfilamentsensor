@@ -69,14 +69,26 @@ Files in [`3d_print_files_and_bom/`](3d_print_files_and_bom/) (print-ready 3MF):
 
 ESP32 only measures filament movement. All clog detection logic runs inside Klipper.
 
-### Setup
+### Setup (with auto-update)
 
-1. Upload `smart_filament_sensor.py` via **Mainsail/Fluidd** (Machine tab → Upload)
-2. SSH into your Pi and copy it to Klipper extras:
 ```bash
-cp ~/printer_data/config/smart_filament_sensor.py ~/klipper/klippy/extras/
-sudo systemctl restart klipper
+cd ~
+git clone https://github.com/ozancs/smartfilamentsensor.git
+~/smartfilamentsensor/install.sh
 ```
+
+Add to `moonraker.conf` for automatic updates:
+```ini
+[update_manager smart_filament_sensor]
+type: git_repo
+path: ~/smartfilamentsensor
+origin: https://github.com/ozancs/smartfilamentsensor.git
+install_script: install.sh
+primary_branch: main
+managed_services: klipper
+```
+
+**Manual install:** Upload `smart_filament_sensor.py` via Mainsail/Fluidd, SSH and `cp ~/printer_data/config/smart_filament_sensor.py ~/klipper/klippy/extras/`
 
 ### printer.cfg
 
@@ -104,7 +116,8 @@ health_check_interval: 30.0       # seconds between health checks
 **Calibration:**
 | Command | Description |
 |---|---|
-| `SFS_CALIBRATE LENGTH=50` | Start calibration (extrude, wait 5s or apply) |
+| `SFS_AUTO_CALIBRATE TEMP=200 LENGTH=50` | One-command: heat, extrude, save |
+| `SFS_CALIBRATE LENGTH=50` | Manual calibration start |
 | `SFS_CALIBRATE_APPLY` | Save calibration immediately |
 | `SFS_CALIBRATE_STOP` | Cancel calibration |
 
@@ -116,12 +129,15 @@ health_check_interval: 30.0       # seconds between health checks
 | `SFS_SET DIR=-1` | Reverse encoder direction |
 | `SFS_SET CAL=12.5` | Manual calibration factor (deg/mm) |
 
-### Calibration Example
+### Calibration
 
 ```gcode
+; Automatic (recommended) — heats, extrudes, saves:
+SFS_AUTO_CALIBRATE TEMP=200 LENGTH=50 SPEED=100
+
+; Manual — you control the extrusion:
 SFS_CALIBRATE LENGTH=50
 G1 E50 F100
-; wait 5s for auto-save, or:
 SFS_CALIBRATE_APPLY
 ```
 

@@ -11,13 +11,28 @@
   1. INSTALLATION
 ===============================================================================
 
-  Step 1 — Upload smart_filament_sensor.py via Mainsail/Fluidd (Machine tab)
+  Option A — Git install (recommended, enables auto-update):
 
-  Step 2 — SSH into your Pi and copy to Klipper extras:
+    cd ~
+    git clone https://github.com/ozancs/smartfilamentsensor.git
+    ~/smartfilamentsensor/install.sh
 
-    cp ~/printer_data/config/smart_filament_sensor.py ~/klipper/klippy/extras/
+  Add to moonraker.conf for automatic updates:
 
-  Step 3 — Add to printer.cfg:
+    [update_manager smart_filament_sensor]
+    type: git_repo
+    path: ~/smartfilamentsensor
+    origin: https://github.com/ozancs/smartfilamentsensor.git
+    install_script: install.sh
+    primary_branch: main
+    managed_services: klipper
+
+  Option B — Manual install:
+
+    1. Upload smart_filament_sensor.py via Mainsail/Fluidd (Machine tab)
+    2. SSH: cp ~/printer_data/config/smart_filament_sensor.py ~/klipper/klippy/extras/
+
+  Then add to printer.cfg:
 
     [smart_filament_sensor sfs]
     serial: auto
@@ -83,9 +98,17 @@
 
   -- Calibration --
 
+  SFS_AUTO_CALIBRATE [TEMP=200] [LENGTH=50] [SPEED=100]
+      One-command calibration. Heats hotend to TEMP, extrudes
+      LENGTH mm at SPEED (mm/min), auto-saves result.
+      No manual steps needed — just run and wait.
+
+      TEMP    Hotend temperature in C (default: 200)
+      LENGTH  Filament to extrude in mm (default: 50)
+      SPEED   Extrusion speed in mm/min (default: 100)
+
   SFS_CALIBRATE [LENGTH=10]
-      Start encoder calibration. LENGTH = mm to push/extrude.
-      Default: 10mm. For best accuracy, use 50-100mm.
+      Manual calibration start. You control the extrusion.
       After filament stops, waits 5s then auto-saves.
 
   SFS_CALIBRATE_APPLY
@@ -114,7 +137,13 @@
   4. CALIBRATION WALKTHROUGH
 ===============================================================================
 
-  From Klipper console (Mainsail / Fluidd / KlipperScreen):
+  Automatic (recommended):
+
+    SFS_AUTO_CALIBRATE TEMP=200 LENGTH=50 SPEED=100
+
+    That's it! The sensor heats the hotend, extrudes 50mm, and saves.
+
+  Manual (if you need more control):
 
     1.  SFS_CALIBRATE LENGTH=50       ; start calibration
     2.  G1 E50 F100                   ; extrude 50mm slowly
