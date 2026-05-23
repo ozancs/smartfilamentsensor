@@ -57,7 +57,7 @@
 #     SFS_RESET           Re-sync extruder position and reset ESP32 odometer
 #
 #   Calibration:
-#     SFS_AUTO_CALIBRATE [TEMP=200] [LENGTH=50] [SPEED=100]
+#     SFS_AUTO_CALIBRATE [TEMP=240] [LENGTH=50] [SPEED=100]
 #                                  One-command calibration: heats hotend,
 #                                  extrudes, saves automatically.
 #     SFS_CALIBRATE [LENGTH=10] Manual calibration start. Extrude LENGTH mm
@@ -168,7 +168,7 @@ class SmartFilamentSensor:
         self.gcode.register_command('SFS_SET', self.cmd_SET,
             desc="Change ESP32 settings. Usage: SFS_SET [SENS=] [NOISE=] [BRIGHT=] [DIR=] [CAL=]")
         self.gcode.register_command('SFS_AUTO_CALIBRATE', self.cmd_AUTO_CALIBRATE,
-            desc="Auto calibrate: heat, extrude, save. Usage: SFS_AUTO_CALIBRATE [TEMP=200] [LENGTH=50] [SPEED=100]")
+            desc="Auto calibrate: heat, extrude, save. Usage: SFS_AUTO_CALIBRATE [TEMP=240] [LENGTH=50] [SPEED=100]")
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -785,7 +785,7 @@ class SmartFilamentSensor:
         """One-command calibration: heat hotend, extrude, auto-save."""
         if not self._require_connected(gcmd):
             return
-        temp = gcmd.get_float('TEMP', 200., above=0.)
+        temp = gcmd.get_float('TEMP', 240., above=0.)
         length = gcmd.get_float('LENGTH', 50., above=0.)
         speed = gcmd.get_float('SPEED', 100., above=0.)  # mm/min
 

@@ -116,7 +116,7 @@ health_check_interval: 30.0       # seconds between health checks
 **Calibration:**
 | Command | Description |
 |---|---|
-| `SFS_AUTO_CALIBRATE TEMP=200 LENGTH=50` | One-command: heat, extrude, save |
+| `SFS_AUTO_CALIBRATE TEMP=240 LENGTH=50` | One-command: heat, extrude, save |
 | `SFS_CALIBRATE LENGTH=50` | Manual calibration start |
 | `SFS_CALIBRATE_APPLY` | Save calibration immediately |
 | `SFS_CALIBRATE_STOP` | Cancel calibration |
@@ -133,7 +133,7 @@ health_check_interval: 30.0       # seconds between health checks
 
 ```gcode
 ; Automatic (recommended) — heats, extrudes, saves:
-SFS_AUTO_CALIBRATE TEMP=200 LENGTH=50 SPEED=100
+SFS_AUTO_CALIBRATE TEMP=240 LENGTH=50 SPEED=100
 
 ; Manual — you control the extrusion:
 SFS_CALIBRATE LENGTH=50

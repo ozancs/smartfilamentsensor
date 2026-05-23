@@ -98,7 +98,7 @@
 
   -- Calibration --
 
-  SFS_AUTO_CALIBRATE [TEMP=200] [LENGTH=50] [SPEED=100]
+  SFS_AUTO_CALIBRATE [TEMP=240] [LENGTH=50] [SPEED=100]
       One-command calibration. Heats hotend to TEMP, extrudes
       LENGTH mm at SPEED (mm/min), auto-saves result.
       No manual steps needed — just run and wait.
@@ -139,7 +139,7 @@
 
   Automatic (recommended):
 
-    SFS_AUTO_CALIBRATE TEMP=200 LENGTH=50 SPEED=100
+    SFS_AUTO_CALIBRATE TEMP=240 LENGTH=50 SPEED=100
 
     That's it! The sensor heats the hotend, extrudes 50mm, and saves.
 
