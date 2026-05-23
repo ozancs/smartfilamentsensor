@@ -1,33 +1,35 @@
 ===============================================================================
-  SMART FILAMENT SENSOR (SFS) — Klipper Integration Guide v2.2
+  SMART FILAMENT SENSOR (SFS) — Klipper Integration Guide v2.5
 ===============================================================================
 
   ESP32 + AS5600 encoder based filament sensor with native Klipper module.
-  ESP32 only measures filament movement. All clog detection logic runs
-  inside Klipper.
+  ESP32 only measures filament movement. All underextrusion detection
+  and pause logic runs inside Klipper.
 
 
 ===============================================================================
   1. INSTALLATION
 ===============================================================================
 
-  Step 1 — Copy the module:
+  Step 1 — Upload smart_filament_sensor.py via Mainsail/Fluidd (Machine tab)
 
-    cp smart_filament_sensor.py ~/klipper/klippy/extras/
+  Step 2 — SSH into your Pi and copy to Klipper extras:
 
-  Step 2 — Add to printer.cfg:
+    cp ~/printer_data/config/smart_filament_sensor.py ~/klipper/klippy/extras/
 
-    [smart_filament_sensor my_sensor]
-    serial: /dev/ttyUSB0
+  Step 3 — Add to printer.cfg:
+
+    [smart_filament_sensor sfs]
+    serial: auto
     baud: 115200
     detection_length: 7.0
-    tolerance: 2.0
-    pause_on_clog: True
-    clog_gcode: PAUSE
-    underextrusion_period: 10.0
+    pause_on_runout: True
+    runout_gcode: PAUSE
+    underextrusion_max_rate: 0.5
+    underextrusion_period: 5.0
     health_check_interval: 30.0
 
-  Step 3 — Restart Klipper:
+  Step 4 — Restart Klipper:
 
     sudo systemctl restart klipper
 
@@ -36,91 +38,76 @@
   2. CONFIG PARAMETERS
 ===============================================================================
 
-  serial              ESP32 serial port (e.g. /dev/ttyUSB0, /dev/ttyACM0)
-  baud                Baud rate, must match ESP32 firmware (default: 115200)
-  detection_length    mm of extrusion between each clog check (default: 7.0)
-  tolerance           max allowed deviation in mm before clog (default: 2.0)
-  pause_on_clog       automatically pause on detection (default: True)
-  clog_gcode          gcode to run on clog (default: PAUSE)
-  underextrusion_period  seconds to average underextrusion rate (default: 10.0)
+  serial                 ESP32 serial port. "auto" = auto-detect via
+                         PING/PONG handshake (recommended). Or use a
+                         stable path like /dev/serial/by-id/...
+  baud                   Baud rate, must match ESP32 firmware (default: 115200)
+  detection_length       mm of extrusion between each check (default: 7.0)
+  pause_on_runout        automatically pause on detection (default: True)
+  runout_gcode           gcode to run on clog/runout (default: PAUSE)
+  underextrusion_max_rate  underextrusion ratio threshold (0.0-1.0).
+                         0.5 = pause if actual extrusion < 50% of expected.
+                         (default: 0.5)
+  underextrusion_period  how many seconds underextrusion must persist
+                         before triggering a pause (default: 5.0)
   health_check_interval  seconds between magnet health checks (default: 30.0)
 
-  Example — detection_length=7.0, tolerance=2.0:
-    Klipper extrudes 7mm, ESP32 encoder measures 4.8mm
-    Deviation = |7.0 - 4.8| = 2.2mm > 2.0mm tolerance
-    Result: CLOG DETECTED -> PAUSE
+  How detection works:
+    - Klipper extrudes 7mm, ESP32 encoder measures actual movement
+    - Rolling underextrusion rate is calculated over recent readings
+    - If rate exceeds underextrusion_max_rate, a timer starts
+    - If it stays bad for underextrusion_period seconds -> PAUSE
+    - If it recovers before the timer expires -> timer resets, no pause
+    - Single bad readings are NEVER enough to pause a print
 
 
 ===============================================================================
   3. GCODE COMMANDS
 ===============================================================================
 
-  ── Clog Detection ──────────────────────────────────────────────────────
+  -- Clog Detection --
 
   SFS_STATUS
-      Show current sensor state: enabled, printing, homing status,
-      sensor connection, magnet health, underextrusion rate,
-      mm since last check.
+      Show current sensor state: connection, magnet health,
+      underextrusion rate, timer status, detection config.
 
   SFS_ENABLE
-      Enable clog detection. Resets odometer and re-syncs extruder
-      position. Use after RESUME or filament change.
+      Enable clog detection. Resets odometer and re-syncs extruder.
 
   SFS_DISABLE
       Disable clog detection without disconnecting the sensor.
-      Useful during maintenance, filament loading, or calibration.
 
   SFS_RESET
       Re-sync Klipper extruder position with ESP32 odometer.
-      Also clears underextrusion rate history.
-      Use if you suspect the counters drifted (e.g. after a manual
-      filament push).
+      Clears underextrusion history and resets timer.
 
-  ── Calibration ─────────────────────────────────────────────────────────
+  -- Calibration --
 
   SFS_CALIBRATE [LENGTH=10]
-      Start encoder calibration. ESP32 enters calibration mode and
-      begins tracking filament movement.
-
-      LENGTH = how many mm of filament you will push/extrude.
+      Start encoder calibration. LENGTH = mm to push/extrude.
       Default: 10mm. For best accuracy, use 50-100mm.
-
-      After the filament stops moving, ESP32 waits 5 seconds then
-      auto-calculates and saves the new calibration factor.
+      After filament stops, waits 5s then auto-saves.
 
   SFS_CALIBRATE_APPLY
-      Force-save the calibration result immediately without waiting
-      for the 5-second idle timeout.
+      Force-save calibration immediately (skip 5s wait).
 
   SFS_CALIBRATE_STOP
-      Cancel the active calibration without saving.
+      Cancel active calibration without saving.
 
-  ── ESP32 Settings ──────────────────────────────────────────────────────
+  -- ESP32 Settings --
 
   SFS_SET [SENS=<1-50>] [NOISE=<1-20>] [BRIGHT=<1-255>] [DIR=<1/-1>] [CAL=<float>]
 
-      Set one or more ESP32 parameters. All parameters are optional
-      and can be combined freely. Values are saved to ESP32 NVS flash
-      and persist across power cycles.
-
-      SENS    Movement sensitivity — minimum encoder steps to register
-              filament motion. Higher = less sensitive. (default: 5)
-
-      NOISE   Noise filter deadband — encoder jitter below this is
-              ignored. Higher = more filtering. (default: 3)
-
-      BRIGHT  WS2812B status LED brightness. (default: 50)
-
-      DIR     Encoder direction multiplier. Set to -1 if the sensor
-              reads negative when filament feeds forward. (default: 1)
-
-      CAL     Calibration factor in degrees per mm. Normally set by
-              SFS_CALIBRATE, but can be overridden manually. (default: 12.5)
+      SENS    Movement sensitivity (encoder steps). Higher = less sensitive.
+      NOISE   Noise filter deadband. Higher = more filtering.
+      BRIGHT  Status LED brightness.
+      DIR     Encoder direction. Set -1 if sensor reads backwards.
+      CAL     Calibration factor (deg/mm). Normally set by SFS_CALIBRATE.
 
   Examples:
       SFS_SET BRIGHT=10
       SFS_SET SENS=3 NOISE=2
-      SFS_SET BRIGHT=80 DIR=-1 CAL=11.2345
+      SFS_SET BRIGHT=80 DIR=-1
 
 
 ===============================================================================
@@ -129,28 +116,31 @@
 
   From Klipper console (Mainsail / Fluidd / KlipperScreen):
 
-    1.  SFS_CALIBRATE LENGTH=50       ; start calibration, target 50mm
+    1.  SFS_CALIBRATE LENGTH=50       ; start calibration
     2.  G1 E50 F100                   ; extrude 50mm slowly
     3.  ; Wait 5 seconds...           ; ESP32 auto-saves
         ; or: SFS_CALIBRATE_APPLY     ; save immediately
 
-  The new calibration factor appears in the Klipper console:
+  Output:
     >>> CALIBRATION SUCCESS!
     >>> Measured: 49.82 mm | Target: 50.0 mm
     >>> New Cal Factor: 12.3456 deg/mm (saved)
 
+  If the result is unusual (< 3 or > 50 deg/mm), a warning appears.
+  Check magnet position, encoder direction, or re-calibrate.
+
   Tips:
-    - Use a longer calibration length (50-100mm) for better accuracy
+    - Longer calibration (50-100mm) = better accuracy
     - Extrude slowly (F60-F100) for consistent results
-    - You can repeat calibration multiple times, each run refines further
-    - The cal factor is saved to ESP32 flash — survives power off
+    - Cal factor is saved to ESP32 flash, survives power off
 
 
 ===============================================================================
   5. OPTIONAL PAUSE / RESUME MACROS
 ===============================================================================
 
-  If you don't already have PAUSE/RESUME macros in your printer.cfg:
+  Note: Mainsail.cfg already includes PAUSE/RESUME macros.
+  Only add these if you DON'T have them:
 
     [gcode_macro PAUSE]
     rename_existing: BASE_PAUSE
@@ -161,115 +151,122 @@
       G1 Z10 F600
       G90
       G1 X10 Y10 F6000
-      RESTORE_GCODE_STATE NAME=PAUSE_state
 
     [gcode_macro RESUME]
     rename_existing: BASE_RESUME
     gcode:
+      RESTORE_GCODE_STATE NAME=PAUSE_state MOVE=1 MOVE_SPEED=80
       BASE_RESUME
 
 
 ===============================================================================
-  6. ADVANCED FEATURES (v2.2)
+  6. ADVANCED FEATURES (v2.5)
 ===============================================================================
 
-  ── Underextrusion Rate ─────────────────────────────────────────────────
+  -- Time-Based Underextrusion Detection --
 
-  The module continuously tracks the ratio of actual vs. commanded
-  extrusion over a rolling time window (underextrusion_period).
+  Instead of pausing on every single bad reading, the module uses
+  a time-based approach (inspired by Roadrunner filament sensor):
 
-    underextrusion_rate = 0.0%  →  perfect extrusion
-    underextrusion_rate = 30%   →  30% underextrusion (partial clog)
-    underextrusion_rate = 100%  →  total clog / runout
+    1. Rolling underextrusion rate is calculated from recent readings
+    2. If rate > underextrusion_max_rate -> timer starts
+    3. If rate stays bad for underextrusion_period seconds -> PAUSE
+    4. If rate recovers -> timer resets, print continues
 
-  This value is exposed to Moonraker via get_status() and can be
-  displayed on Mainsail/Fluidd dashboards.
+  This means:
+    - A momentary hiccup never pauses your print
+    - A real clog is detected within seconds
+    - Gradual nozzle clogs are caught by sustained underextrusion
 
-  ── Magnet Health Monitoring ────────────────────────────────────────────
+  SFS_STATUS shows the timer:
+    underextrusion_timer=idle      -> all good
+    underextrusion_timer=2.3s      -> alarm active, counting
 
-  Every health_check_interval seconds, the module queries the ESP32's
-  magnet state. If the magnet is not detected during a print, the
-  module warns the user. States:
+  -- Auto-Detect Serial Port --
 
+  Set serial: auto in printer.cfg. The module will:
+    1. Scan /dev/serial/by-id/ for ESP32 devices
+    2. Send PING and verify PONG response
+    3. Fall back to /dev/ttyACM* and /dev/ttyUSB* with verification
+  This prevents grabbing CAN adapters or EBB boards by mistake.
+
+  -- Retraction Filter --
+
+  Retraction moves (negative E) are properly handled:
+    - Normal retraction (up to 20mm): tracked but not reset
+    - G92 E0 or slicer E-reset (>20mm jump): encoder re-synced
+  Retract + unretract cancel out in the encoder, no false triggers.
+
+  -- Magnet Health Monitoring --
+
+  Every health_check_interval seconds, the ESP32's magnet is checked:
     ok          Magnet detected, AGC in healthy range
-    too_weak    Magnet detected but signal is weak (move closer)
-    too_strong  Magnet detected but signal is saturated (move further)
-    no_magnet   No magnet detected (critical — readings unreliable)
+    too_weak    Magnet signal weak (move closer)
+    no_magnet   No magnet detected (critical)
 
-  ── Sensor Connection Monitoring ────────────────────────────────────────
+  -- Sensor Connection Watchdog --
 
-  If no response is received from the ESP32 within 5 seconds, the
-  module marks the sensor as disconnected and warns the user.
-  The sensor automatically reconnects when communication resumes.
+  If no response is received within health_check_interval + 10s,
+  the sensor is marked disconnected. All commands check connection
+  before executing — no silent failures.
 
-  ── Homing Awareness ───────────────────────────────────────────────────
+  If the serial reader thread crashes, it's detected and reported.
 
-  Clog detection is automatically paused during homing moves to
-  prevent false triggers. The odometer re-syncs after homing completes.
+  -- Homing Awareness --
 
-  ── Moonraker / Dashboard Integration ──────────────────────────────────
+  Detection is paused during homing moves. Odometer re-syncs after.
 
-  The module exposes real-time data via get_status():
+  -- Moonraker / Dashboard Data --
 
-    enabled              bool    clog detection on/off
-    sensor_connected     bool    ESP32 communication status
-    magnet_state         string  ok / too_weak / too_strong / no_magnet
-    magnet_agc           int     raw AGC value (0-255)
-    underextrusion_rate  float   0.0 (perfect) to 1.0 (total clog)
-    detection_length     float   mm between checks
-    tolerance            float   mm deviation threshold
-    is_printing          bool    print state
-    is_homing            bool    homing in progress
-
-  These values update in real-time and can be used in Mainsail/Fluidd
-  dashboard widgets or custom macros.
+  get_status() exposes:
+    enabled               bool    detection on/off
+    sensor_connected      bool    ESP32 communication status
+    magnet_state          string  ok / too_weak / no_magnet
+    magnet_agc            int     raw AGC value (0-255)
+    underextrusion_rate   float   0.0 (perfect) to 1.0 (total clog)
+    underextrusion_max_rate float configured threshold
+    underextrusion_alarming bool  timer is running
+    detection_length      float   mm between checks
+    is_printing           bool    print state
+    is_homing             bool    homing in progress
 
 
 ===============================================================================
-  7. LED STATUS INDICATORS (on the ESP32 sensor board)
+  7. TROUBLESHOOTING
 ===============================================================================
 
-  White breathing    Idle — no filament movement for 5+ seconds
-  LED off            Deep idle — no movement for 5+ minutes
-  Blue pulsing       Filament is moving
-  Solid green        Measure mode active
-  Solid yellow       Calibration mode active
-
-
-===============================================================================
-  8. TROUBLESHOOTING
-===============================================================================
-
-  "Cannot open serial port"
-    - Check that the ESP32 is connected and the port is correct
-    - Run: ls /dev/ttyUSB* /dev/ttyACM*
-    - Make sure no other process (screen, minicom) holds the port
-    - Add klipper user to dialout group: sudo usermod -aG dialout $USER
+  "Sensor not found" / auto-detect failed
+    - Check ESP32 is connected: ls /dev/ttyACM* /dev/ttyUSB*
+    - Make sure no other process holds the port (screen, minicom)
+    - Add user to dialout: sudo usermod -aG dialout $USER
+    - Try setting serial to explicit path instead of auto
 
   "Sensor disconnected" warning
-    - Check USB cable connection
-    - Try a different USB port
-    - If using a USB hub, try connecting directly
-    - Check: ls /dev/ttyUSB* to verify the device is still present
+    - Check USB cable
+    - Try a different USB port (avoid hubs)
+    - Run FIRMWARE_RESTART to reconnect
 
-  "Magnet not detected" warning
+  "Magnet not detected"
     - Check magnet is centered in the holder
     - Verify AS5600 air gap is 1-2mm
-    - Check AGC value in SFS_STATUS — healthy range is 40-200
+    - Check AGC in SFS_STATUS (healthy: 40-200)
 
-  False clog detections
-    - Increase tolerance in printer.cfg (e.g. 3.0 or 4.0)
-    - Increase detection_length (e.g. 10.0 or 15.0)
-    - Re-calibrate with SFS_CALIBRATE LENGTH=100
-    - Check underextrusion_rate in SFS_STATUS for baseline
+  False pauses / too sensitive
+    - Increase underextrusion_max_rate (e.g. 0.7 = only pause if <30% flow)
+    - Increase underextrusion_period (e.g. 10.0 = must persist 10 seconds)
+    - Re-calibrate: SFS_CALIBRATE LENGTH=100
 
-  No detection / never triggers
-    - Decrease tolerance (e.g. 1.0)
+  Never detects clogs
+    - Decrease underextrusion_max_rate (e.g. 0.3)
+    - Decrease underextrusion_period (e.g. 3.0)
     - Check SFS_STATUS — is detection enabled?
-    - Check sensor_connected status
-    - Check calibration factor — run SFS_SET to verify
+    - Verify sensor is connected and magnet OK
 
   Encoder reads wrong direction
     - SFS_SET DIR=-1
+
+  "ERROR - sensor not connected" on commands
+    - Sensor is offline, commands are blocked for safety
+    - Plug in sensor and run FIRMWARE_RESTART
 
 ===============================================================================

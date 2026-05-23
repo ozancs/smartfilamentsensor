@@ -9,7 +9,7 @@ High-precision filament motion sensor for 3D printers. Uses an **ESP32-C3** and 
 ## Features
 
 - **Sub-mm accuracy** — AS5600 contactless encoder (4096 steps/rev), median-filtered, no drift
-- **Native Klipper module** — compares commanded vs. actual extrusion, pauses on mismatch
+- **Native Klipper module** — time-based underextrusion detection, single bad readings never pause your print
 - **Auto-detect serial port** — no need to manually set `/dev/ttyACM0`, finds ESP32 automatically
 - **Underextrusion tracking** — rolling average exposed to Moonraker/Mainsail/Fluidd dashboards
 - **Magnet health monitoring** — continuous AGC tracking, warns on weak/missing magnet
@@ -82,14 +82,14 @@ sudo systemctl restart klipper
 
 ```ini
 [smart_filament_sensor sfs]
-serial: auto                  # auto-detects ESP32 (or use /dev/serial/by-id/...)
+serial: auto                      # auto-detects ESP32 (or use /dev/serial/by-id/...)
 baud: 115200
-detection_length: 7.0         # mm between each check
-tolerance: 2.0                # max deviation before clog
-pause_on_clog: True
-clog_gcode: PAUSE
-underextrusion_period: 10.0   # seconds for underextrusion averaging
-health_check_interval: 30.0   # seconds between health checks
+detection_length: 7.0             # mm between each check
+pause_on_runout: True
+runout_gcode: PAUSE
+underextrusion_max_rate: 0.5      # 0.0-1.0, pause if actual < 50% of expected
+underextrusion_period: 5.0        # seconds underextrusion must persist before pause
+health_check_interval: 30.0       # seconds between health checks
 ```
 
 ### GCode Commands
@@ -143,11 +143,13 @@ Portable `.exe` — no installation required.
 ## How It Works
 
 ```
-Klipper: "I extruded 7.0mm"  →  ESP32 encoder saw 6.8mm
-  |7.0 - 6.8| = 0.2mm < 2.0mm tolerance → OK
+Every 7mm of extrusion, Klipper asks ESP32 how much filament actually moved.
 
-Klipper: "I extruded 7.0mm"  →  ESP32 encoder saw 1.2mm
-  |7.0 - 1.2| = 5.8mm > 2.0mm tolerance → CLOG → PAUSE
+Klipper: 7.0mm commanded  →  ESP32: 6.8mm measured  →  97% flow ✓
+Klipper: 7.0mm commanded  →  ESP32: 6.2mm measured  →  89% flow ✓
+Klipper: 7.0mm commanded  →  ESP32: 1.2mm measured  →  17% flow ✗ (timer starts)
+  ... underextrusion persists for 5 seconds ...             → PAUSE
+  ... or flow recovers before 5 seconds ...                 → timer resets, continue
 ```
 
 ---
@@ -169,7 +171,7 @@ Klipper: "I extruded 7.0mm"  →  ESP32 encoder saw 1.2mm
 ```
 smartfilamentsensor/
 ├── klipper_guide/
-│   ├── smart_filament_sensor.py   # Klipper module (v2.3)
+│   ├── smart_filament_sensor.py   # Klipper module (v2.5)
 │   └── KLIPPER_GUIDE.txt
 ├── 3d_print_files_and_bom/        # 3MF + BOM
 ├── photos/
