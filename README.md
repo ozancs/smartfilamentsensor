@@ -71,9 +71,10 @@ ESP32 only measures filament movement. All clog detection logic runs inside Klip
 
 ### Setup
 
+1. Upload `smart_filament_sensor.py` via **Mainsail/Fluidd** (Machine tab → Upload)
+2. SSH into your Pi and copy it to Klipper extras:
 ```bash
-# Copy module and restart
-cp klipper_guide/smart_filament_sensor.py ~/klipper/klippy/extras/
+cp ~/printer_data/config/smart_filament_sensor.py ~/klipper/klippy/extras/
 sudo systemctl restart klipper
 ```
 
