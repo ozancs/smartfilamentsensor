@@ -1,7 +1,7 @@
 # smart_filament_sensor.py — Klipper klippy extra module
 #
 # ═══════════════════════════════════════════════════════════════════════════
-#  SMART FILAMENT SENSOR — Klipper Native Module v2.2
+#  SMART FILAMENT SENSOR — Klipper Native Module v2.3
 # ═══════════════════════════════════════════════════════════════════════════
 #
 #  ESP32 is a pure measurement device. It only reports how many mm of
@@ -38,7 +38,7 @@
 # ─── printer.cfg ──────────────────────────────────────────────────────────
 #
 #   [smart_filament_sensor my_sensor]
-#   serial: /dev/ttyUSB0          # ESP32 serial port
+#   serial: auto                  # auto-detect ESP32, or use /dev/serial/by-id/...
 #   baud: 115200                  # must match ESP32 firmware
 #   detection_length: 7.0         # mm of extrusion between each clog check
 #   tolerance: 2.0                # max allowed deviation (mm) before clog
@@ -78,6 +78,8 @@ import serial
 import threading
 import logging
 import time
+import glob
+import os
 
 class SmartFilamentSensor:
     def __init__(self, config):
@@ -87,7 +89,7 @@ class SmartFilamentSensor:
         self.name     = config.get_name().split()[-1]
 
         # Config — all decision logic stays here, not on ESP32
-        self.serial_port      = config.get('serial')
+        self.serial_port      = config.get('serial', 'auto')
         self.baud_rate        = config.getint('baud', 115200)
         self.detection_length = config.getfloat('detection_length', 7.0, above=0.)
         self.tolerance        = config.getfloat('tolerance', 2.0, above=0.)
@@ -105,6 +107,7 @@ class SmartFilamentSensor:
         self._last_e_pos       = None   # Klipper E position at last check
         self._pending_expected = None   # mm we expected when we sent GET_MM_RESET
         self._calibrating      = False  # True while calibration is active
+        self._active_port      = None   # Actual port we connected to
 
         # Sensor connection tracking
         self._connected        = False
@@ -150,14 +153,72 @@ class SmartFilamentSensor:
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
+    def _auto_detect_port(self):
+        """Try to find ESP32 serial port automatically."""
+        # 1. Check /dev/serial/by-id/ for stable symlinks (best option)
+        by_id = glob.glob('/dev/serial/by-id/*')
+        for path in by_id:
+            real = os.path.realpath(path)
+            lower = path.lower()
+            # ESP32-C3 typically shows as usb-Espressif or similar
+            if 'esp' in lower or 'cp210' in lower or 'ch340' in lower or 'usb' in lower:
+                logging.info(
+                    "SmartFilamentSensor '%s': auto-detected %s -> %s"
+                    % (self.name, path, real))
+                return path  # Return the stable symlink path
+
+        # 2. Fallback: try /dev/ttyACM* and /dev/ttyUSB* ports
+        candidates = sorted(glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*'))
+        for port in candidates:
+            try:
+                # Quick open/close test to see if port is available
+                test = serial.Serial(port, self.baud_rate, timeout=0.5)
+                # Send PING and check for valid response
+                test.write(b'PING\n')
+                response = test.readline().decode('utf-8', errors='replace').strip()
+                test.close()
+                if response == 'PONG':
+                    logging.info(
+                        "SmartFilamentSensor '%s': auto-detected %s (PONG received)"
+                        % (self.name, port))
+                    return port
+            except Exception:
+                continue
+
+        return None
+
     def _handle_connect(self):
+        # Resolve port: auto-detect or use configured path
+        port = self.serial_port
+        if port == 'auto':
+            detected = self._auto_detect_port()
+            if detected:
+                port = detected
+            else:
+                logging.warning(
+                    "SmartFilamentSensor '%s': auto-detect failed, "
+                    "no ESP32 sensor found on any serial port"
+                    % self.name)
+                self._connected = False
+                self.gcode.respond_info(
+                    "SmartFilamentSensor '%s': sensor not found. "
+                    "Plug in the sensor and run FIRMWARE_RESTART."
+                    % self.name)
+                # Still register timers so health check can retry
+                self.reactor.register_timer(
+                    self._extrusion_check, self.reactor.monotonic() + 2.0)
+                self.reactor.register_timer(
+                    self._health_check,
+                    self.reactor.monotonic() + self.health_check_interval)
+                return
+
         try:
-            self._serial = serial.Serial(
-                self.serial_port, self.baud_rate, timeout=0.1)
+            self._serial = serial.Serial(port, self.baud_rate, timeout=0.1)
             self._connected = True
             self._last_response_time = time.monotonic()
+            self._active_port = port  # Track which port we actually connected to
             logging.info("SmartFilamentSensor '%s': connected to %s"
-                         % (self.name, self.serial_port))
+                         % (self.name, port))
 
             self._reader_thread = threading.Thread(
                 target=self._serial_reader, daemon=True)
@@ -169,12 +230,12 @@ class SmartFilamentSensor:
             logging.warning(
                 "SmartFilamentSensor '%s': cannot open %s: %s "
                 "(sensor will be detected when plugged in)"
-                % (self.name, self.serial_port, e))
+                % (self.name, port, e))
             self._connected = False
             self.gcode.respond_info(
                 "SmartFilamentSensor '%s': sensor not found on %s. "
                 "Plug in the sensor and run FIRMWARE_RESTART."
-                % (self.name, self.serial_port))
+                % (self.name, port))
 
         # Extrusion check timer (250ms for faster response)
         self.reactor.register_timer(
@@ -431,6 +492,7 @@ class SmartFilamentSensor:
         return {
             'enabled': self._enabled,
             'sensor_connected': self._connected,
+            'port': self._active_port or self.serial_port,
             'magnet_state': self._magnet_state,
             'magnet_agc': self._magnet_agc,
             'underextrusion_rate': round(self._underextrusion_rate, 4),
@@ -442,26 +504,44 @@ class SmartFilamentSensor:
 
     # ── GCode Commands ───────────────────────────────────────────────────────
 
-    def cmd_STATUS(self, gcmd):
-        # Check if serial port is still valid
+    def _require_connected(self, gcmd):
+        """Check if sensor is connected. Returns True if OK, False if not."""
         if self._serial and not self._serial.is_open:
             self._connected = False
+        if not self._connected:
+            port_info = self._active_port or self.serial_port
+            gcmd.respond_info(
+                "SmartFilamentSensor '%s': ERROR - sensor not connected! "
+                "(port: %s)\nPlug in the sensor and run FIRMWARE_RESTART."
+                % (self.name, port_info))
+            return False
+        return True
+
+    def cmd_STATUS(self, gcmd):
+        # Update connection state
+        if self._serial and not self._serial.is_open:
+            self._connected = False
+        port_info = self._active_port or self.serial_port
         e     = self._get_e_pos()
         last  = self._last_e_pos or 0.0
         since = (e - last) if e is not None else 0.0
         gcmd.respond_info(
             "SmartFilamentSensor '%s':\n"
+            "  port=%s  sensor_connected=%s\n"
             "  enabled=%s  printing=%s  homing=%s\n"
-            "  sensor_connected=%s  magnet=%s (AGC:%d)\n"
+            "  magnet=%s (AGC:%d)\n"
             "  detection_length=%.1fmm  tolerance=%.1fmm\n"
             "  underextrusion_rate=%.1f%%\n"
             "  since_last_check=%.2fmm"
-            % (self.name, self._enabled, self._is_printing(),
-               self._homing, self._connected, self._magnet_state,
+            % (self.name, port_info, self._connected,
+               self._enabled, self._is_printing(),
+               self._homing, self._magnet_state,
                self._magnet_agc, self.detection_length, self.tolerance,
                self._underextrusion_rate * 100, since))
 
     def cmd_ENABLE(self, gcmd):
+        if not self._require_connected(gcmd):
+            return
         self._enabled = True
         self._last_e_pos = self._get_e_pos()
         self._send("RESET_MM")
@@ -472,6 +552,8 @@ class SmartFilamentSensor:
         gcmd.respond_info("SmartFilamentSensor '%s': disabled" % self.name)
 
     def cmd_RESET(self, gcmd):
+        if not self._require_connected(gcmd):
+            return
         self._last_e_pos = self._get_e_pos()
         self._pending_expected = None
         self._extrusion_samples = []
@@ -480,6 +562,8 @@ class SmartFilamentSensor:
         gcmd.respond_info("SmartFilamentSensor '%s': re-synced" % self.name)
 
     def cmd_CALIBRATE(self, gcmd):
+        if not self._require_connected(gcmd):
+            return
         length = gcmd.get_float('LENGTH', 10.0, above=0.)
         self._calibrating = True
         self._send("START %.1f" % length)
@@ -490,6 +574,8 @@ class SmartFilamentSensor:
             % (self.name, length, length))
 
     def cmd_CALIBRATE_APPLY(self, gcmd):
+        if not self._require_connected(gcmd):
+            return
         if not self._calibrating:
             gcmd.respond_info("SmartFilamentSensor '%s': no calibration active" % self.name)
             return
@@ -497,11 +583,15 @@ class SmartFilamentSensor:
         gcmd.respond_info("SmartFilamentSensor '%s': apply sent, waiting for result..." % self.name)
 
     def cmd_CALIBRATE_STOP(self, gcmd):
+        if not self._require_connected(gcmd):
+            return
         self._calibrating = False
         self._send("STOP")
         gcmd.respond_info("SmartFilamentSensor '%s': calibration cancelled" % self.name)
 
     def cmd_SET(self, gcmd):
+        if not self._require_connected(gcmd):
+            return
         sent = []
         sens = gcmd.get_int('SENS', None)
         if sens is not None:

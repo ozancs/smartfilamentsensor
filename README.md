@@ -1,8 +1,6 @@
 # Smart Filament Sensor
 
-> **⚠️ WARNING: KLIPPER INTEGRATION IS NOT FULLY TESTED YET. YOU MAY ENCOUNTER BUGS OR UNEXPECTED BEHAVIOR.**
-
-High-precision filament motion sensor for 3D printers. Uses an **ESP32-C3** and **AS5600** magnetic encoder to track filament movement at sub-millimeter accuracy. Detects clogs, runouts, and slippage in real-time with native **Klipper** integration.
+High-precision filament motion sensor for 3D printers. Uses an **ESP32-C3** and **AS5600** magnetic encoder to detect clogs, runouts, and slippage in real-time with native **Klipper** integration.
 
 > **Build video coming soon** — in the meantime, follow the **[Installation Guide](INSTALLATION_GUIDE.md)** and use the [interactive CAD model](https://a360.co/4fwGLLL) for reference.
 
@@ -10,18 +8,16 @@ High-precision filament motion sensor for 3D printers. Uses an **ESP32-C3** and 
 
 ## Features
 
-- **Sub-mm accuracy** — AS5600 contactless encoder, 4096 steps/revolution, median-filtered
-- **Native Klipper module** — klippy extra that compares commanded extrusion vs. actual encoder reading
-- **Automatic clog detection** — configurable detection window and tolerance, pauses print on mismatch
-- **One-command calibration** — `SFS_CALIBRATE LENGTH=50`, extrude, done. Saved to flash permanently
-- **Status LED** — WS2812B with smooth breathing/pulse animations (idle, moving, calibrating)
-- **Windows console app** — standalone .exe for calibration, live measurement, settings, and firmware flashing
-- **No drift** — absolute encoder, no step counting errors over time
-- **Underextrusion rate tracking** — rolling average of actual vs. commanded extrusion ratio, exposed to Moonraker dashboards
-- **Magnet health monitoring** — continuous AGC tracking, warns on weak/missing magnet during print
-- **Sensor connection watchdog** — detects USB disconnection, auto-reconnects, warns user
-- **Homing awareness** — automatically pauses detection during homing moves to prevent false triggers
-- **Moonraker/Dashboard integration** — `get_status()` exposes real-time sensor data to Mainsail/Fluidd
+- **Sub-mm accuracy** — AS5600 contactless encoder (4096 steps/rev), median-filtered, no drift
+- **Native Klipper module** — compares commanded vs. actual extrusion, pauses on mismatch
+- **Auto-detect serial port** — no need to manually set `/dev/ttyACM0`, finds ESP32 automatically
+- **Underextrusion tracking** — rolling average exposed to Moonraker/Mainsail/Fluidd dashboards
+- **Magnet health monitoring** — continuous AGC tracking, warns on weak/missing magnet
+- **Sensor watchdog** — detects USB disconnection, warns user, blocks commands when offline
+- **Homing awareness** — pauses detection during homing to prevent false triggers
+- **One-command calibration** — `SFS_CALIBRATE LENGTH=50`, extrude, done
+- **Status LED** — WS2812B breathing/pulse animations (idle, moving, calibrating)
+- **Windows console app** — portable .exe for calibration, live measurement, settings, firmware flashing
 
 ---
 
@@ -31,101 +27,101 @@ High-precision filament motion sensor for 3D printers. Uses an **ESP32-C3** and 
 |---|---|---|
 | ESP32-C3 Super Mini | 1 | Main MCU |
 | AS5600 Encoder Module | 1 | With diametrical magnet |
-| WS2812B NeoPixel 5050 | 1 | Status LED (single round PCB) |
+| WS2812B NeoPixel 5050 | 1 | Status LED |
 | Grooved Bearing (U604ZZ) | 2 | OD 13mm, ID 4mm |
 | Dowel Pin 3mm x 15mm | 1 | Bearing axle |
-| O-Ring (~11mm OD) | 1 | Filament grip on bearing |
+| O-Ring (~11mm OD) | 1 | Filament grip |
 | PC4-M6 Fitting | 2 | Bowden tube entry/exit |
 | Compression Spring | 1 | Pen-style, cut to length |
-| M3 Screw (M3x8–M3x10) | 1 | |
-| M2 Self-Tapping Screw | 2 | AS5600 mount + ESP32 mount |
+| M3 Screw (M3x8-M3x10) | 1 | |
+| M2 Self-Tapping Screw | 2 | AS5600 + ESP32 mount |
 
-Full BOM with images: [`3d_print_files_and_bom/bom.html`](3d_print_files_and_bom/bom.html)
+Full BOM: [`3d_print_files_and_bom/bom.html`](3d_print_files_and_bom/bom.html)
 
 ---
 
 ## 3D Printed Parts
 
-All files are in [`3d_print_files_and_bom/`](3d_print_files_and_bom/) as print-ready 3MF:
+Files in [`3d_print_files_and_bom/`](3d_print_files_and_bom/) (print-ready 3MF):
 
-| Part | File |
-|---|---|
-| Sensor Body (with text) | `SmartFilament_Body_w_Text.3mf` |
-| Sensor Body (no text) | `SmartFilament_Body_w-out_Text.3mf` |
-| Back Cover | `BackCover.3mf` |
-| Magnet Holder | `MagnetHolder.3mf` |
-| Spring Arm | `Spring_Arm.3mf` |
+- `SmartFilament_Body_w_Text.3mf` / `SmartFilament_Body_w-out_Text.3mf`
+- `BackCover.3mf` / `MagnetHolder.3mf` / `Spring_Arm.3mf`
 
-**[Interactive CAD Model (Fusion 360)](https://a360.co/4fwGLLL)** — rotate, inspect, and measure all parts online.
+**[Interactive CAD Model (Fusion 360)](https://a360.co/4fwGLLL)**
 
 ---
 
 ## Firmware
 
 ### Quick Flash (Windows)
-
-1. Download the console app `.exe` from [Releases](../../releases)
-2. Connect the ESP32 via USB
-3. Open the app → **Firmware** tab → **Start Firmware Flash**
+1. Download `Smart Filament Sensor Console v2.1.exe`
+2. Connect ESP32 via USB → open app → **Firmware** tab → **Flash**
 
 ### Build from Source (Arduino IDE)
-
-1. Install board: **ESP32-C3** (Arduino ESP32 core)
-2. Install libraries: `AS5600`, `FastLED`
-3. Open `smart_filament_sensor.ino`, select board **ESP32C3 Dev Module**
-4. In **Tools** menu, set **USB CDC On Boot: Enabled**
-5. Upload
+1. Board: **ESP32C3 Dev Module** (Arduino ESP32 core)
+2. Libraries: `AS5600`, `FastLED`
+3. Tools → **USB CDC On Boot: Enabled**
+4. Open `smart_filament_sensor.ino` → Upload
 
 ---
 
 ## Klipper Integration
 
-The sensor works as a native Klipper module. ESP32 only measures — all clog detection logic runs inside Klipper.
+ESP32 only measures filament movement. All clog detection logic runs inside Klipper.
 
 ### Setup
 
 ```bash
-# 1. Copy the klippy module
-cp klipper/smart_filament_sensor.py ~/klipper/klippy/extras/
-
-# 2. Restart Klipper
+# Copy module and restart
+cp klipper_guide/smart_filament_sensor.py ~/klipper/klippy/extras/
 sudo systemctl restart klipper
 ```
 
 ### printer.cfg
 
 ```ini
-[smart_filament_sensor my_sensor]
-serial: /dev/ttyUSB0
+[smart_filament_sensor sfs]
+serial: auto                  # auto-detects ESP32 (or use /dev/serial/by-id/...)
 baud: 115200
-detection_length: 7.0        # mm of extrusion between each check
-tolerance: 2.0                # max allowed deviation (mm) before clog
+detection_length: 7.0         # mm between each check
+tolerance: 2.0                # max deviation before clog
 pause_on_clog: True
 clog_gcode: PAUSE
-underextrusion_period: 10.0   # seconds to average underextrusion rate
-health_check_interval: 30.0   # seconds between magnet health checks
+underextrusion_period: 10.0   # seconds for underextrusion averaging
+health_check_interval: 30.0   # seconds between health checks
 ```
 
 ### GCode Commands
 
+**Detection:**
 | Command | Description |
 |---|---|
-| `SFS_STATUS` | Show sensor state, health, underextrusion rate |
+| `SFS_STATUS` | Sensor state, health, underextrusion rate |
 | `SFS_ENABLE` / `SFS_DISABLE` | Toggle clog detection |
-| `SFS_RESET` | Re-sync extruder position, reset odometer & stats |
-| `SFS_CALIBRATE [LENGTH=50]` | Start calibration |
+| `SFS_RESET` | Re-sync position, reset stats |
+
+**Calibration:**
+| Command | Description |
+|---|---|
+| `SFS_CALIBRATE LENGTH=50` | Start calibration (extrude, wait 5s or apply) |
 | `SFS_CALIBRATE_APPLY` | Save calibration immediately |
 | `SFS_CALIBRATE_STOP` | Cancel calibration |
-| `SFS_SET BRIGHT=80` | Change LED brightness |
-| `SFS_SET SENS=5 NOISE=3` | Change sensitivity and noise filter |
-| `SFS_SET DIR=-1` | Reverse encoder direction |
 
-### Calibration via Klipper
+**ESP32 Settings:**
+| Command | Description |
+|---|---|
+| `SFS_SET SENS=5 NOISE=3` | Sensitivity + noise filter |
+| `SFS_SET BRIGHT=80` | LED brightness (1-255) |
+| `SFS_SET DIR=-1` | Reverse encoder direction |
+| `SFS_SET CAL=12.5` | Manual calibration factor (deg/mm) |
+
+### Calibration Example
 
 ```gcode
-SFS_CALIBRATE LENGTH=50    ; start calibration
-G1 E50 F100                ; extrude 50mm slowly
-SFS_CALIBRATE_APPLY        ; save immediately (or wait 5s for auto-save)
+SFS_CALIBRATE LENGTH=50
+G1 E50 F100
+; wait 5s for auto-save, or:
+SFS_CALIBRATE_APPLY
 ```
 
 Full guide: [`klipper_guide/KLIPPER_GUIDE.txt`](klipper_guide/KLIPPER_GUIDE.txt)
@@ -134,61 +130,36 @@ Full guide: [`klipper_guide/KLIPPER_GUIDE.txt`](klipper_guide/KLIPPER_GUIDE.txt)
 
 ## Console App (Windows)
 
-Standalone desktop application for calibration, live measurement, settings management, and firmware flashing.
+Portable `.exe` — no installation required.
 
-Download the portable `.exe` from [Releases](../../releases) — no installation required.
-
-### Features
-- **Dashboard** — calibration wizard, live mm measurement, all sensor settings
-- **Serial Monitor** — raw terminal with quick-action buttons
+- **Dashboard** — calibration wizard, live mm readout, sensor settings
+- **Serial Monitor** — raw terminal with quick-action buttons for all commands
 - **Firmware** — one-click ESP32 flash with bundled esptool
-- **Klipper Guide** — printer.cfg config, full Python module code, PAUSE macros
+- **Klipper Guide** — config snippets and full Python module
 
 ---
 
 ## How It Works
 
 ```
-Klipper: "I extruded 7.0mm"  →  GET_MM_RESET  →  ESP32
-ESP32:   "Encoder saw 6.8mm" ←  MM:6.8000     ←  ESP32
+Klipper: "I extruded 7.0mm"  →  ESP32 encoder saw 6.8mm
+  |7.0 - 6.8| = 0.2mm < 2.0mm tolerance → OK
 
-Deviation = |7.0 - 6.8| = 0.2mm < 2.0mm tolerance → OK
-
-Klipper: "I extruded 7.0mm"  →  GET_MM_RESET  →  ESP32
-ESP32:   "Encoder saw 1.2mm" ←  MM:1.2000     ←  ESP32
-
-Deviation = |7.0 - 1.2| = 5.8mm > 2.0mm tolerance → PAUSE
+Klipper: "I extruded 7.0mm"  →  ESP32 encoder saw 1.2mm
+  |7.0 - 1.2| = 5.8mm > 2.0mm tolerance → CLOG → PAUSE
 ```
-
----
-
-## Moonraker / Dashboard Data
-
-The Klipper module exposes real-time sensor data via `get_status()`, accessible from Mainsail, Fluidd, or custom macros:
-
-| Field | Type | Description |
-|---|---|---|
-| `enabled` | bool | Clog detection on/off |
-| `sensor_connected` | bool | ESP32 communication status |
-| `magnet_state` | string | `ok` / `too_weak` / `too_strong` / `no_magnet` |
-| `magnet_agc` | int | Raw AGC value (0-255, healthy: 40-200) |
-| `underextrusion_rate` | float | 0.0 (perfect) to 1.0 (total clog) |
-| `detection_length` | float | mm between checks |
-| `tolerance` | float | mm deviation threshold |
-| `is_printing` | bool | Print state |
-| `is_homing` | bool | Homing in progress |
 
 ---
 
 ## LED Status
 
-| LED State | Meaning |
+| LED | Meaning |
 |---|---|
-| White breathing | Idle (5s+ no movement) |
-| LED off | Deep idle (5min+ no movement) |
+| White breathing | Idle |
 | Blue pulsing | Filament moving |
 | Solid green | Measure mode |
 | Solid yellow | Calibration mode |
+| LED off | Deep idle (5min+) |
 
 ---
 
@@ -197,17 +168,13 @@ The Klipper module exposes real-time sensor data via `get_status()`, accessible 
 ```
 smartfilamentsensor/
 ├── klipper_guide/
-│   ├── smart_filament_sensor.py  # Klipper klippy module (v2.2)
-│   └── KLIPPER_GUIDE.txt         # Full integration guide
-├── 3d_print_files_and_bom/       # 3MF files + BOM
-│   ├── SmartFilament_Body_*.3mf
-│   ├── BackCover.3mf
-│   ├── MagnetHolder.3mf
-│   ├── Spring_Arm.3mf
-│   └── bom.html
-├── photos/                       # Build reference photos
-├── INSTALLATION_GUIDE.md         # Step-by-step assembly guide
-├── bom.html                      # Bill of Materials
+│   ├── smart_filament_sensor.py   # Klipper module (v2.3)
+│   └── KLIPPER_GUIDE.txt
+├── 3d_print_files_and_bom/        # 3MF + BOM
+├── photos/
+├── firmware/                       # Pre-built .bin files
+├── smart_filament_sensor.ino       # ESP32 firmware source
+├── INSTALLATION_GUIDE.md
 └── README.md
 ```
 
