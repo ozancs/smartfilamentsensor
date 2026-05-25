@@ -44,6 +44,18 @@ echo "Symlink created:"
 echo "  ${DST} -> ${SRC}"
 echo ""
 
+# Add to Klipper's git exclude so Mainsail/Fluidd won't show
+# "Repo has untracked source files" warning
+EXCLUDE_FILE="${HOME}/klipper/.git/info/exclude"
+EXCLUDE_ENTRY="klippy/extras/smart_filament_sensor.py"
+if [ -f "$EXCLUDE_FILE" ]; then
+    if ! grep -qF "$EXCLUDE_ENTRY" "$EXCLUDE_FILE" 2>/dev/null; then
+        echo "$EXCLUDE_ENTRY" >> "$EXCLUDE_FILE"
+        echo "Added to Klipper git exclude (no more untracked file warning)"
+    fi
+fi
+echo ""
+
 # Restart Klipper
 echo "Restarting Klipper..."
 sudo systemctl restart klipper
