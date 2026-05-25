@@ -241,7 +241,7 @@ void loop() {
             Serial.printf(">>> Smart Filament Sensor v%s\n", FW_VERSION);
         }
         else if (upperInput == "PING") {
-            Serial.println(">>> SMART_FILAMENT_SENSOR <<<");
+            Serial.println("PONG");
         }
         else if (upperInput == "GET_MM") {
             double measured = calculateDistance(global_steps - odometer_reset_steps);
