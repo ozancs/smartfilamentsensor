@@ -47,7 +47,7 @@ Files in [`3d_print_files_and_bom/`](3d_print_files_and_bom/) (print-ready 3MF):
 - `SmartFilament_Body_w_Text.3mf` / `SmartFilament_Body_w-out_Text.3mf`
 - `BackCover.3mf` / `MagnetHolder.3mf` / `Spring_Arm.3mf`
 
-**[Interactive CAD Model (Fusion 360)](https://a360.co/4fwGLLL)**
+**[Interactive CAD Model (Fusion 360)](https://a360.co/3QY3KFT)**
 
 ---
 
