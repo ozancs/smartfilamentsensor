@@ -113,6 +113,8 @@ class SmartFilamentSensor:
         self._enabled          = True
         self._last_e_pos       = None   # Klipper E position at last check
         self._pending_expected = None   # mm we expected when we sent GET_MM_RESET
+        self._measure_active   = False  # True between MEASURE start and read
+        self._measure_pending  = False  # True while waiting for MEASURE mm reply
         self._calibrating      = False  # True while calibration is active
         self._active_port      = None   # Actual port we connected to
 
@@ -169,6 +171,8 @@ class SmartFilamentSensor:
             desc="Change ESP32 settings. Usage: SFS_SET [SENS=] [NOISE=] [BRIGHT=] [DIR=] [CAL=]")
         self.gcode.register_command('SFS_AUTO_CALIBRATE', self.cmd_AUTO_CALIBRATE,
             desc="Auto calibrate: heat, extrude, save. Usage: SFS_AUTO_CALIBRATE [TEMP=240] [LENGTH=50] [SPEED=100]")
+        self.gcode.register_command('SFS_MEASURE', self.cmd_MEASURE,
+            desc="Measure mode: 1st call resets, extrude, 2nd call shows measured mm")
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -406,6 +410,15 @@ class SmartFilamentSensor:
                 actual_mm = float(line[3:])
             except ValueError:
                 return
+
+            # Measure mode reply — just report raw mm, no detection logic
+            if self._measure_pending:
+                self._measure_pending = False
+                self.reactor.register_async_callback(
+                    lambda et, v=actual_mm: self.gcode.respond_info(
+                        "SFS MEASURE: %.2f mm measured" % v))
+                return
+
             expected = self._pending_expected
             self._pending_expected = None
             if expected is None:
@@ -714,6 +727,23 @@ class SmartFilamentSensor:
         self._runout_triggered = False
         self._send("RESET_MM")
         gcmd.respond_info("SmartFilamentSensor '%s': re-synced" % self.name)
+
+    def cmd_MEASURE(self, gcmd):
+        # Manual measure - works without printing state.
+        # 1st call: reset encoder. Extrude/pull filament. 2nd call: show mm.
+        if not self._require_connected(gcmd):
+            return
+        if not self._measure_active:
+            self._send("RESET_MM")
+            self._measure_active = True
+            gcmd.respond_info(
+                "SFS MEASURE: started (encoder zeroed). Extrude/feed filament, "
+                "then run SFS_MEASURE again to read measured mm.")
+        else:
+            self._measure_active = False
+            self._measure_pending = True
+            self._send("GET_MM")
+            gcmd.respond_info("SFS MEASURE: reading encoder...")
 
     def cmd_CALIBRATE(self, gcmd):
         if not self._require_connected(gcmd):
