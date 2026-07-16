@@ -85,7 +85,7 @@ import time
 import glob
 import os
 
-__version__ = "2.7.0"
+__version__ = "2.7.1"
 
 # Expected PING→PONG identifier for auto-detect (avoids grabbing CAN/EBB ports)
 _SFS_IDENTITY = "PONG"
@@ -150,6 +150,10 @@ class SmartFilamentSensor:
 
         # Homing awareness
         self._homing           = False
+
+        # Print-state edge detection: on the not-printing -> printing
+        # transition both sides resync (see _extrusion_check)
+        self._was_printing     = False
 
         # Calibration validation — expected range for deg/mm
         self._cal_min = 3.0   # below this = something very wrong
@@ -556,6 +560,10 @@ class SmartFilamentSensor:
             if self._measure_pending:
                 if time.monotonic() <= self._measure_deadline:
                     self._measure_pending = False
+                    # Leave the odometer at zero so the next detection
+                    # window starts clean instead of inheriting the
+                    # measurement session's total
+                    self._send("RESET_MM")
                     self.reactor.register_async_callback(
                         lambda et, v=actual_mm: self.gcode.respond_info(
                             "SFS MEASURE: %.2f mm measured" % v))
@@ -569,6 +577,16 @@ class SmartFilamentSensor:
 
             # Record sample for underextrusion averaging
             now = time.monotonic()
+            # A long gap since the previous sample (travel moves, pauses)
+            # means the alarm timer was frozen, not accumulating evidence.
+            # Without this reset, one bad sample after a >period gap would
+            # satisfy "elapsed >= period" instantly and pause the print off
+            # a single reading — the exact thing the timer exists to prevent.
+            if (self._extrusion_samples and
+                    now - self._extrusion_samples[-1][0]
+                    > self.underextrusion_period):
+                self._extrusion_samples = []
+                self._underextrusion_start_time = None
             self._extrusion_samples.append((now, expected, actual_mm))
             # Prune old samples outside the averaging period
             cutoff = now - self.underextrusion_period
@@ -736,12 +754,31 @@ class SmartFilamentSensor:
             self._pending_expected = None
             return eventtime + 0.25
 
+        # Measure mode owns the odometer: a detection window would send
+        # GET_MM_RESET and wipe the measurement the user is in the middle of.
+        # Track E so nothing stale accumulates, open no windows.
+        if self._measure_active or self._measure_pending:
+            self._last_e_pos = self._get_e_pos()
+            return eventtime + 0.25
+
         if not self._is_printing():
+            self._was_printing = False
             self._last_e_pos = self._get_e_pos()
             return eventtime + 0.25
 
         current_e = self._get_e_pos()
         if current_e is None:
+            return eventtime + 0.25
+
+        # Entering the printing state (fresh print, or resume after pause).
+        # Anything the encoder counted meanwhile — manual extrudes during a
+        # filament change, purge at resume — never entered `expected`, so
+        # start both sides from zero instead of comparing across the gap.
+        if not self._was_printing:
+            self._was_printing = True
+            self._reset_detection_state()
+            self._last_e_pos = current_e
+            self._send("RESET_MM")
             return eventtime + 0.25
 
         if self._last_e_pos is None:
@@ -959,6 +996,10 @@ class SmartFilamentSensor:
         if not self._require_connected(gcmd):
             return
         if not self._measure_active:
+            # RESET_MM zeroes the same odometer detection windows read from.
+            # Clear detection state (with grace) so a window opened before
+            # this command can't pair its expected mm with a zeroed counter.
+            self._reset_detection_state()
             self._send("RESET_MM")
             self._measure_active = True
             gcmd.respond_info(
@@ -968,6 +1009,9 @@ class SmartFilamentSensor:
             self._measure_active = False
             self._measure_pending = True
             self._measure_deadline = time.monotonic() + 5.0
+            # The GET_MM reply must pair with the measure request, not with a
+            # detection window that opened in between
+            self._reset_detection_state()
             self._send("GET_MM")
             gcmd.respond_info("SFS MEASURE: reading encoder...")
 
