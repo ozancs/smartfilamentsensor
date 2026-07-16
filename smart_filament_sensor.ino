@@ -8,7 +8,7 @@
 #define SCL_PIN 5
 #define NEO_PIN 2
 #define NUM_LEDS 1
-#define FW_VERSION "2.2.0"
+#define FW_VERSION "2.3.0"
 
 Preferences prefs;
 AS5600 as5600;
@@ -42,16 +42,6 @@ const unsigned long DEEP_IDLE_TIMEOUT_MS = 300000; // 5 minutes (5 * 60 * 1000)
 // ── LED Animation ──
 CRGB currentColor = CRGB::Black;
 CRGB targetColor = CRGB::Black;
-
-// ── Median Filter (3-sample) for encoder noise rejection ──
-int deltaHistory[3] = {0, 0, 0};
-int deltaIndex = 0;
-
-int medianOfThree(int a, int b, int c) {
-    if ((a >= b && a <= c) || (a <= b && a >= c)) return a;
-    if ((b >= a && b <= c) || (b <= a && b >= c)) return b;
-    return c;
-}
 
 // ── Distance Calculation ──
 double calculateDistance(long long steps) {
@@ -396,7 +386,7 @@ void loop() {
         } // end if (input.length() > 0)
     }
 
-    // ── 2. Encoder Reading with Median Filter ──
+    // ── 2. Encoder Reading ──
     uint16_t currentAngle = as5600.readAngle();
     int rawDelta = (int)currentAngle - (int)lastAngle;
 
@@ -404,21 +394,32 @@ void loop() {
     if (rawDelta > 2048) rawDelta -= 4096;
     else if (rawDelta < -2048) rawDelta += 4096;
 
-    // Median filter: take median of last 3 raw deltas to reject spikes
-    deltaHistory[deltaIndex] = rawDelta;
-    deltaIndex = (deltaIndex + 1) % 3;
-    int delta = medianOfThree(deltaHistory[0], deltaHistory[1], deltaHistory[2]);
-
-    // Apply noise deadband
-    if (abs(delta) >= noise_threshold) {
-        global_steps += delta;
+    // Noise deadband.
+    //
+    // The accumulator must receive the TRUE delta. lastAngle advances to
+    // currentAngle below, so whatever is not added here is discarded for
+    // good. A 3-sample median filter used to sit at this point and fed its
+    // filtered value to global_steps while still advancing lastAngle — so
+    // every difference between rawDelta and the median was silently lost.
+    // Real acceleration looks exactly like a spike to a median, which is why
+    // a slow steady calibration extrude measured ~99% accurate while a real
+    // print (constant accel/decel) under-read by up to 80%.
+    //
+    // Glitch protection: the rollover handling above already bounds rawDelta
+    // to +/-2048 steps, about 14mm of filament in a single loop iteration —
+    // physically unreachable at any real print speed.
+    //
+    // Below the deadband lastAngle is intentionally NOT advanced, so slow
+    // movement accumulates across iterations instead of being filtered away.
+    if (abs(rawDelta) >= noise_threshold) {
+        global_steps += rawDelta;
         lastAngle = currentAngle;
-        
+
         if (measure_active || test_active) {
             long long rel_steps = global_steps - session_start_steps;
             float current_mm = calculateDistance(rel_steps);
             
-            // Log every 0.01mm change
+            // Log every 1mm change (avoids flooding Klipper console)
             if (fabs(current_mm - lastLoggedMm) >= 1.0f) {
                 Serial.printf("[%s] %.2f mm (Steps: %lld)\n", 
                              (test_active ? "CAL" : "MEA"), current_mm, rel_steps);
@@ -427,7 +428,7 @@ void loop() {
             lastMoveTime = millis();
             lastMoveLedTime = millis();
         } 
-        else if (abs(delta) >= sensitivity) {
+        else if (abs(rawDelta) >= sensitivity) {
             lastMoveTime = millis();
             lastMoveLedTime = millis();
         }
