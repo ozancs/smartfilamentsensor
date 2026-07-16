@@ -85,7 +85,7 @@ import time
 import glob
 import os
 
-__version__ = "2.6.0"
+__version__ = "2.6.1"
 
 # Expected PING→PONG identifier for auto-detect (avoids grabbing CAN/EBB ports)
 _SFS_IDENTITY = "PONG"
@@ -122,6 +122,9 @@ class SmartFilamentSensor:
                                         # reply can't swallow a detection sample
         self._calibrating      = False  # True while calibration is active
         self._active_port      = None   # Actual port we connected to
+        self._last_good_port   = None   # Port that passed PING/PONG before —
+                                        # reconnects reuse it instead of
+                                        # re-probing every serial device
 
         # Sensor connection tracking
         self._connected        = False
@@ -192,24 +195,82 @@ class SmartFilamentSensor:
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
-    def _auto_detect_port(self):
-        """Try to find ESP32 serial port automatically.
-        Uses PING/PONG handshake to avoid grabbing CAN adapters or EBB boards.
-        """
-        # 1. Check /dev/serial/by-id/ for stable symlinks
-        by_id = glob.glob('/dev/serial/by-id/*')
-        for path in by_id:
-            lower = path.lower()
-            if 'esp' in lower or 'cp210' in lower or 'ch340' in lower:
-                # Verify with PING/PONG before committing
-                if self._verify_sensor(path):
-                    return path
+    def _klipper_mcu_ports(self):
+        """Serial paths Klipper uses for its own MCUs.
 
-        # 2. Fallback: try /dev/ttyACM* and /dev/ttyUSB* with PING verification
-        candidates = sorted(
+        Probing a port means opening it and writing "PING" to it. Doing that
+        to an MCU injects garbage into its protocol stream and takes the
+        printer down ("Missed scheduling of next digital out event"), which
+        also kills any CAN board bridged through it. These are never probed.
+        """
+        ports = set()
+        try:
+            settings = self.printer.lookup_object(
+                'configfile').get_status(None)['settings']
+        except Exception:
+            # Can't enumerate: assume nothing is safe to blind-probe
+            return None
+        for section, values in settings.items():
+            if section != 'mcu' and not section.startswith('mcu '):
+                continue
+            try:
+                path = values.get('serial')
+            except Exception:
+                continue
+            if path:
+                ports.add(path)
+                try:
+                    ports.add(os.path.realpath(path))
+                except Exception:
+                    pass
+        return ports
+
+    def _auto_detect_port(self, full_scan=True):
+        """Find the ESP32 serial port. Uses a PING/PONG handshake.
+
+        full_scan=False restricts this to the port we already verified once.
+        Reconnects use that: rescanning would PING every candidate again, and
+        the sensor's by-id path is stable across re-enumeration anyway.
+        """
+        exclude = self._klipper_mcu_ports()
+        if exclude is None:
+            logging.warning(
+                "SmartFilamentSensor '%s': cannot enumerate Klipper MCU "
+                "ports, skipping probe to avoid disturbing them" % self.name)
+            return None
+
+        def usable(port):
+            if port in exclude:
+                return False
+            try:
+                return os.path.realpath(port) not in exclude
+            except Exception:
+                return False
+
+        # A port we verified before is the only one worth reopening.
+        if self._last_good_port and usable(self._last_good_port):
+            if self._verify_sensor(self._last_good_port):
+                return self._last_good_port
+
+        if not full_scan:
+            return None
+
+        # 1. /dev/serial/by-id/ symlinks that look like an ESP32
+        candidates = [p for p in sorted(glob.glob('/dev/serial/by-id/*'))
+                      if any(k in p.lower()
+                             for k in ('esp', 'cp210', 'ch340'))]
+        # 2. Fallback: raw tty devices
+        candidates += sorted(
             glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*'))
+
         for port in candidates:
+            if not usable(port):
+                logging.info(
+                    "SmartFilamentSensor '%s': not probing %s (Klipper MCU)"
+                    % (self.name, port))
+                continue
             if self._verify_sensor(port):
+                self._last_good_port = port
                 return port
 
         return None
@@ -264,17 +325,21 @@ class SmartFilamentSensor:
         self._reader_thread = None
         self._reader_died = False
 
-    def _attempt_connect(self):
+    def _attempt_connect(self, full_scan=True):
         """Open the sensor port and start reading. Returns True on success.
 
         Safe to call repeatedly. Blocks while probing ports, so callers must
         keep it off the reactor thread once Klipper is running.
+
+        full_scan=False limits auto-detect to the already-known port. Used for
+        reconnects, which happen while the printer is live and must not probe
+        anything else.
         """
         self._teardown_serial()
 
         port = self.serial_port
         if port == 'auto':
-            port = self._auto_detect_port()
+            port = self._auto_detect_port(full_scan=full_scan)
             if not port:
                 logging.warning(
                     "SmartFilamentSensor '%s': auto-detect found no sensor"
@@ -290,6 +355,7 @@ class SmartFilamentSensor:
             return False
 
         self._active_port = port
+        self._last_good_port = port
         self._last_response_time = time.monotonic()
         self._connected = True
         # A fresh port means a possibly-rebooted sensor with a zeroed counter
@@ -331,7 +397,9 @@ class SmartFilamentSensor:
 
         def worker():
             try:
-                if self._attempt_connect():
+                # full_scan=False: the printer is live, so probing anything
+                # beyond the known port risks PINGing an MCU
+                if self._attempt_connect(full_scan=False):
                     self.reactor.register_async_callback(
                         lambda et: self.gcode.respond_info(
                             "SmartFilamentSensor '%s': sensor reconnected "
