@@ -85,7 +85,7 @@ import time
 import glob
 import os
 
-__version__ = "2.6.1"
+__version__ = "2.7.0"
 
 # Expected PING→PONG identifier for auto-detect (avoids grabbing CAN/EBB ports)
 _SFS_IDENTITY = "PONG"
@@ -660,9 +660,22 @@ class SmartFilamentSensor:
         total_expected = sum(s[1] for s in self._extrusion_samples)
         total_actual = sum(s[2] for s in self._extrusion_samples)
         if total_expected > 0:
-            # underextrusion_rate: 0.0 = perfect, 1.0 = total clog
-            self._underextrusion_rate = max(
-                0.0, 1.0 - (total_actual / total_expected))
+            # underextrusion_rate: 0.0 = perfect, 1.0 = total clog.
+            # Clamped to 1.0: a rate above 100% is arithmetically impossible
+            # for real filament movement (it needs a negative total_actual),
+            # so it always means the accounting has desynced rather than the
+            # filament having stopped. Reporting "260% underextrusion" hid
+            # that. Clamping keeps the number meaningful; the log line below
+            # is where a desync shows up.
+            rate = 1.0 - (total_actual / total_expected)
+            if rate > 1.0:
+                logging.warning(
+                    "SmartFilamentSensor '%s': encoder read negative net "
+                    "movement (expected=%.2f actual=%.2f) - accounting "
+                    "desync, not a clog" % (self.name, total_expected,
+                                            total_actual))
+                rate = 1.0
+            self._underextrusion_rate = max(0.0, rate)
         else:
             self._underextrusion_rate = 0.0
 
@@ -738,19 +751,23 @@ class SmartFilamentSensor:
 
         delta = current_e - self._last_e_pos
 
-        # Retraction filter: ignore negative E moves (retract/unretract)
-        # Typical retraction: 0.5-6mm. G92 E0 can jump hundreds of mm.
+        # A large negative jump is a G92 E0 / slicer E reset, not filament
+        # moving backwards. Nothing physical happened, so resync both sides.
         if delta < -20.0:
-            # Huge negative = G92 E0 or slicer E reset, re-sync encoder
             self._last_e_pos = current_e
             self._send("RESET_MM")
             return eventtime + 0.25
-        elif delta < 0:
-            # Normal retraction (up to 20mm), just track position
-            # Encoder sees retract+unretract, net movement cancels out
-            self._last_e_pos = current_e
-            return eventtime + 0.25
 
+        # Retractions are deliberately NOT special-cased. delta is left to
+        # accumulate as *net* movement since the last check, which is exactly
+        # what the encoder counts, so a retract and its unretract cancel on
+        # both sides.
+        #
+        # The previous code advanced _last_e_pos on every negative delta,
+        # which dropped the retraction from `expected` while leaving it in the
+        # encoder's count. The next window then compared, say, -6mm+7mm=+1mm
+        # actual against 7mm expected: a phantom ~86% underextrusion that
+        # paused prints with no clog present.
         if delta >= self.detection_length:
             # A still-pending request means the previous reply never arrived.
             # The sensor already zeroed its counter for that request, so that
