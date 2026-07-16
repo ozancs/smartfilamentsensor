@@ -14,6 +14,8 @@ High-precision filament motion sensor for 3D printers. Uses an **ESP32-C3** and 
 - **Underextrusion tracking** — rolling average exposed to Moonraker/Mainsail/Fluidd dashboards
 - **Magnet health monitoring** — continuous AGC tracking, warns on weak/missing magnet
 - **Sensor watchdog** — detects USB disconnection, warns user, blocks commands when offline
+- **Auto-reconnect** — recovers from USB dropouts on its own, no `FIRMWARE_RESTART` needed
+- **No false pauses on dropout** — a disconnect means "no data", never "no filament"; detection state resyncs instead of tripping a clog
 - **Homing awareness** — pauses detection during homing to prevent false triggers
 - **One-command calibration** — `SFS_CALIBRATE LENGTH=50`, extrude, done
 - **Status LED** — WS2812B breathing/pulse animations (idle, moving, calibrating)
