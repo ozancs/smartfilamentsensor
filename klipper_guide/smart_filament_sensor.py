@@ -85,7 +85,7 @@ import time
 import glob
 import os
 
-__version__ = "2.7.1"
+__version__ = "2.8.0"
 
 # Expected PING→PONG identifier for auto-detect (avoids grabbing CAN/EBB ports)
 _SFS_IDENTITY = "PONG"
@@ -148,8 +148,12 @@ class SmartFilamentSensor:
         self._resync_grace_until = 0.0
         self._resync_grace_period = 5.0
 
-        # Homing awareness
+        # Homing awareness. _homing stays True for the whole homing/probing
+        # window (extended past each probe point by _probe_grace) so the
+        # module never touches serial/reactor mid-probe.
         self._homing           = False
+        self._probe_clear_at   = None
+        self._probe_grace      = 0.75  # seconds of quiet before resuming
 
         # Print-state edge detection: on the not-printing -> printing
         # transition both sides resync (see _extrusion_check)
@@ -393,6 +397,10 @@ class SmartFilamentSensor:
         self.reactor.register_timer(
             self._health_check, self.reactor.monotonic() + self.health_check_interval)
 
+        # Probe-suspension release timer (lifts _homing after probing quiets)
+        self.reactor.register_timer(
+            self._probe_clear_check, self.reactor.monotonic() + 1.0)
+
     def _start_reconnect(self):
         """Kick off a reconnect attempt on a worker thread."""
         if self._reconnecting or self._shutting_down:
@@ -425,14 +433,35 @@ class SmartFilamentSensor:
     # ── Homing Awareness ─────────────────────────────────────────────────────
 
     def _handle_homing_begin(self, hmove):
+        # Suspend ALL module activity for the whole homing/probing window.
+        # During a probe the host must service trsync within microseconds; any
+        # serial write, get_position(), or reader work from this module can
+        # delay the reactor enough to cause "Unable to obtain trsync_state
+        # response" -> "Missed scheduling" -> EBBCan shutdown. Confirmed by
+        # test: print crashes with detection enabled, passes with it off.
         self._homing = True
+        self._probe_clear_at = None
 
     def _handle_homing_end(self, hmove):
-        self._homing = False
-        # Re-sync after homing to avoid false triggers
-        self._reset_detection_state()
-        self._last_e_pos = self._get_e_pos()
-        self._send("RESET_MM")
+        # z_tilt / bed mesh fire begin/end per probe point. Keep suspended
+        # through the short gaps between points instead of resuming (and
+        # sending serial) between every tap. A reactor timer lifts suspension
+        # only after the moves actually stop.
+        self._probe_clear_at = time.monotonic() + self._probe_grace
+        # No serial here — deferred to _probe_clear_check once probing is done.
+
+    def _probe_clear_check(self, eventtime):
+        """Lift homing suspension once probing has been quiet for the grace
+        period, then resync. Runs on the reactor thread."""
+        if self._homing and self._probe_clear_at is not None:
+            if time.monotonic() >= self._probe_clear_at:
+                self._homing = False
+                self._probe_clear_at = None
+                # Now safe to touch serial / toolhead again
+                self._reset_detection_state()
+                self._last_e_pos = self._get_e_pos()
+                self._send("RESET_MM")
+        return eventtime + 0.1
 
     # ── Serial I/O ───────────────────────────────────────────────────────────
 
@@ -486,9 +515,9 @@ class SmartFilamentSensor:
                     "SmartFilamentSensor '%s': reader thread died!" % self.name)
 
     def _handle_line(self, line):
-        """Called from reader thread."""
-        logging.debug("SmartFilamentSensor '%s' RX: %s" % (self.name, line))
-
+        """Called from reader thread. Runs while holding the GIL, so keep it
+        cheap — no per-line disk logging (that stalls the reactor thread if it
+        lands during a probe)."""
         # Any valid response = sensor is alive
         self._last_response_time = time.monotonic()
         if not self._connected:
@@ -742,7 +771,10 @@ class SmartFilamentSensor:
             return False
 
     def _extrusion_check(self, eventtime):
-        # Skip during homing to avoid false triggers
+        # Fully inert during homing/probing: no get_position(), no serial.
+        # This is the reactor-safety guard that stops the module from
+        # delaying trsync during a probe (EBBCan "Missed scheduling" crash).
+        # _homing stays set across the whole probe window via _probe_grace.
         if self._homing:
             return eventtime + 0.25
 
@@ -831,6 +863,11 @@ class SmartFilamentSensor:
     # ── Health Check Timer ───────────────────────────────────────────────────
 
     def _health_check(self, eventtime):
+        # Suspended during homing/probing: no serial writes near a probe.
+        # Reschedule soon so monitoring resumes right after.
+        if self._homing:
+            return eventtime + 1.0
+
         # Check if reader thread died (#3)
         if self._reader_died and self._connected:
             self._connected = False
