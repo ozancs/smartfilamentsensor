@@ -85,7 +85,7 @@ import time
 import glob
 import os
 
-__version__ = "2.8.0"
+__version__ = "2.9.0"
 
 # Expected PING→PONG identifier for auto-detect (avoids grabbing CAN/EBB ports)
 _SFS_IDENTITY = "PONG"
@@ -155,6 +155,12 @@ class SmartFilamentSensor:
         self._probe_clear_at   = None
         self._probe_grace      = 0.75  # seconds of quiet before resuming
 
+        # Explicit suspension (SFS_SUSPEND/SFS_RESUME), depth-counted for
+        # nested macros. Needed because rapid_scan bed mesh streams the eddy
+        # probe WITHOUT homing moves — homing events never fire, so the
+        # event-based guard above cannot see it. Macros suspend explicitly.
+        self._suspend_depth    = 0
+
         # Print-state edge detection: on the not-printing -> printing
         # transition both sides resync (see _extrusion_check)
         self._was_printing     = False
@@ -200,6 +206,10 @@ class SmartFilamentSensor:
             desc="Auto calibrate: heat, extrude, save. Usage: SFS_AUTO_CALIBRATE [TEMP=240] [LENGTH=50] [SPEED=100]")
         self.gcode.register_command('SFS_MEASURE', self.cmd_MEASURE,
             desc="Measure mode: 1st call resets, extrude, 2nd call shows measured mm")
+        self.gcode.register_command('SFS_SUSPEND', self.cmd_SUSPEND,
+            desc="Fully silence the module (no serial I/O) during probing. Nestable.")
+        self.gcode.register_command('SFS_RESUME', self.cmd_RESUME,
+            desc="Lift SFS_SUSPEND; resyncs when the last nested suspend clears")
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -457,10 +467,12 @@ class SmartFilamentSensor:
             if time.monotonic() >= self._probe_clear_at:
                 self._homing = False
                 self._probe_clear_at = None
-                # Now safe to touch serial / toolhead again
-                self._reset_detection_state()
-                self._last_e_pos = self._get_e_pos()
-                self._send("RESET_MM")
+                # Only resync if no explicit suspension is still active —
+                # otherwise SFS_RESUME will do the resync when it clears.
+                if self._suspend_depth == 0:
+                    self._reset_detection_state()
+                    self._last_e_pos = self._get_e_pos()
+                    self._send("RESET_MM")
         return eventtime + 0.1
 
     # ── Serial I/O ───────────────────────────────────────────────────────────
@@ -771,11 +783,12 @@ class SmartFilamentSensor:
             return False
 
     def _extrusion_check(self, eventtime):
-        # Fully inert during homing/probing: no get_position(), no serial.
-        # This is the reactor-safety guard that stops the module from
-        # delaying trsync during a probe (EBBCan "Missed scheduling" crash).
-        # _homing stays set across the whole probe window via _probe_grace.
-        if self._homing:
+        # Fully inert during homing/probing/suspension: no get_position(),
+        # no serial. This is the reactor-safety guard that stops the module
+        # from delaying trsync during a probe (EBBCan "Missed scheduling").
+        # _homing covers homing moves; _suspend_depth covers rapid_scan mesh
+        # (which streams the eddy probe WITHOUT homing moves).
+        if self._silenced():
             return eventtime + 0.25
 
         # No sensor = no data, which is not the same as no filament movement.
@@ -863,9 +876,9 @@ class SmartFilamentSensor:
     # ── Health Check Timer ───────────────────────────────────────────────────
 
     def _health_check(self, eventtime):
-        # Suspended during homing/probing: no serial writes near a probe.
-        # Reschedule soon so monitoring resumes right after.
-        if self._homing:
+        # Silenced during homing/probing/suspension: no serial writes near
+        # a probe. Reschedule soon so monitoring resumes right after.
+        if self._silenced():
             return eventtime + 1.0
 
         # Check if reader thread died (#3)
@@ -1006,6 +1019,27 @@ class SmartFilamentSensor:
                ("%.1fs" % (time.monotonic() - self._underextrusion_start_time)
                 if self._underextrusion_start_time else "idle"),
                since))
+
+    def cmd_SUSPEND(self, gcmd):
+        self._suspend_depth += 1
+        logging.info("SmartFilamentSensor '%s': suspended (depth %d)"
+                     % (self.name, self._suspend_depth))
+
+    def cmd_RESUME(self, gcmd):
+        if self._suspend_depth > 0:
+            self._suspend_depth -= 1
+        if self._suspend_depth == 0:
+            # Fully resumed — both sides may have drifted while silent
+            self._reset_detection_state()
+            self._last_e_pos = self._get_e_pos()
+            if self._connected:
+                self._send("RESET_MM")
+            logging.info("SmartFilamentSensor '%s': resumed, resynced"
+                         % self.name)
+
+    def _silenced(self):
+        """True while the module must not touch serial or the toolhead."""
+        return self._homing or self._suspend_depth > 0
 
     def cmd_ENABLE(self, gcmd):
         if not self._require_connected(gcmd):
