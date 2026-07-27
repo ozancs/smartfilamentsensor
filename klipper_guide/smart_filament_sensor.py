@@ -6,8 +6,57 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #
 #  ESP32 is a pure measurement device. It only reports how many mm of
-#  filament the encoder measured. All clog detection logic (window size,
-#  underextrusion detection, pause decision) lives here in Klipper.
+#  filament the encoder measured. All clog detection logic lives here.
+#
+# ─── WHY THE DETECTION WINDOW IS MEASURED IN mm, NOT SECONDS ──────────────
+#
+#   This sensor is frame-mounted and connected to the toolhead by a bowden
+#   tube (PC4-M6 fittings). The filament between the sensor and the extruder
+#   is therefore NOT rigidly coupled: as the toolhead moves, the path length
+#   changes and the filament is dragged back and forth through the encoder.
+#   Buckling inside the tube stores and releases even more length.
+#
+#   Measured on real prints (klippy logs, July 2026): individual detection
+#   windows read anywhere from -13.8mm to +17.2mm while the commanded
+#   extrusion was ~7mm and the configured retraction was only 0.8mm. This
+#   drag is bounded and averages to zero over distance, but over a handful of
+#   windows it looks exactly like a clog.
+#
+#   The old detector averaged over `underextrusion_period` SECONDS. Window
+#   spacing on a real print is ~2s median, so a 5s average contained a median
+#   of THREE samples — and 9% of the time a single one. A pause was therefore
+#   decided on 2-3 readings. In the log that triggered a false clog, the
+#   deciding average was literally two windows: expected=15.62 actual=-9.07.
+#
+#   Averaging over EXTRUDED DISTANCE fixes this at the root. Drag amplitude
+#   is bounded in mm, so its relative contribution shrinks as the window
+#   grows, while a real clog reads ~100% deficit at every window size.
+#   Replaying the same logs with perfect calibration, the worst drag-only
+#   excursion was:
+#
+#        window    worst false underextrusion
+#         25 mm            260 %
+#         50 mm            106 %
+#        100 mm             88 %
+#        150 mm             58 %
+#        200 mm             41 %
+#        300 mm             26 %
+#
+#   At 200mm the 50% threshold has real margin, and a total clog is still
+#   caught after ~115mm of commanded extrusion (~25s at typical flow).
+#
+# ─── CALIBRATION MATTERS MORE THAN IT USED TO ─────────────────────────────
+#
+#   A distance-averaged detector integrates a steady calibration error
+#   instead of hiding it. Both analysed logs showed the encoder reading only
+#   61-63% of the commanded extrusion — a permanent 37-39% "underextrusion"
+#   that ate three quarters of the headroom to the trigger threshold.
+#
+#   This module now measures that ratio continuously and reports it
+#   (SFS_STATUS -> encoder_gain). If it is not close to 1.00, detection is
+#   NOT armed and the module says so, instead of pausing prints for a
+#   calibration problem. Fix it with SFS_AUTO_CALIBRATE, or compensate a
+#   known steady bias with `encoder_scale`.
 #
 # ─── PROTOCOL ─────────────────────────────────────────────────────────────
 #
@@ -17,64 +66,58 @@
 #   Klipper → ESP32:  "GET_MM\n"         read encoder mm (no reset)
 #   Klipper → ESP32:  "RESET_MM\n"       reset counter only
 #   Klipper → ESP32:  "HEALTH\n"         query magnet health
-#   ESP32   → Klipper: "HEALTH:<state>\n"  ok:<agc>, too_weak, no_magnet
+#   ESP32   → Klipper: "HEALTH:<state>:<agc>\n"
+#                                        ok, too_weak, too_strong, no_magnet
+#   Klipper → ESP32:  "GET_CAL\n"        query calibration factor  (fw >=2.4)
+#   Klipper → ESP32:  "GET_STEPS\n"      raw encoder steps         (fw >=2.4)
+#   ESP32   → Klipper: "CAL:<float>\n"   deg/mm currently stored
+#   Klipper → ESP32:  "DIAG\n"           dump AS5600 registers     (fw >=2.4)
+#   ESP32   → Klipper: "DIAG:<k=v,...>\n"
 #
 #   Klipper → ESP32:  "START <mm>\n"     start calibration with target mm
 #   Klipper → ESP32:  "APPLY\n"          force-save calibration immediately
 #   Klipper → ESP32:  "STOP\n"           cancel calibration / measure
-#   Klipper → ESP32:  "STATUS\n"         query current sensor state
-#
-#   Klipper → ESP32:  "SET SENS <n>\n"   sensitivity (1-50)
-#   Klipper → ESP32:  "SET NOISE <n>\n"  noise threshold (1-20)
-#   Klipper → ESP32:  "SET BRIGHT <n>\n" LED brightness (1-255)
-#   Klipper → ESP32:  "SET DIR <n>\n"    encoder direction (1 or -1)
-#   Klipper → ESP32:  "SET CAL <f>\n"    calibration factor (deg/mm)
+#   Klipper → ESP32:  "SET SENS|NOISE|BRIGHT|DIR|CAL <v>\n"
 #
 # ─── INSTALLATION ─────────────────────────────────────────────────────────
 #
 #   1. Upload this file via Mainsail/Fluidd (Machine tab)
-#   2. SSH: cp ~/printer_data/config/smart_filament_sensor.py ~/klipper/klippy/extras/
-#   3. Add config section to printer.cfg
-#   4. Restart Klipper:  sudo systemctl restart klipper
+#   2. SSH:  mv ~/printer_data/config/smart_filament_sensor.py \
+#                ~/klipper/klippy/extras/
+#      mv, not cp -- a leftover copy in the config folder shows up in the
+#      Mainsail/Fluidd file list as if it were a config file, and editing
+#      that copy does nothing: Klipper loads the one in klippy/extras/.
+#   3. Add the config section below to printer.cfg
+#   4. sudo systemctl restart klipper
 #
 # ─── printer.cfg ──────────────────────────────────────────────────────────
 #
-#   [smart_filament_sensor my_sensor]
-#   serial: auto                  # auto-detect ESP32, or use /dev/serial/by-id/...
-#   baud: 115200                  # must match ESP32 firmware
-#   detection_length: 7.0         # mm of extrusion between each check
-#   pause_on_runout: True         # automatically pause on clog/runout
-#   runout_gcode: PAUSE           # gcode to run when clog detected
-#   underextrusion_max_rate: 0.5  # 0.0-1.0, underextrusion ratio to trigger alarm
-#   underextrusion_period: 5.0    # seconds underextrusion must persist before pause
-#   health_check_interval: 30.0   # seconds between magnet health checks
+#   [smart_filament_sensor sfs]
+#   serial: /dev/serial/by-id/usb-Espressif_...   # fixed path recommended
+#   baud: 115200
+#   detection_length: 7.0          # mm of extrusion per encoder read
+#   detection_window: 200.0        # mm of extrusion averaged per decision
+#   underextrusion_max_rate: 0.5   # 0.0-1.0 deficit that counts as a clog
+#   min_window_samples: 8          # reads required before any decision
+#   encoder_scale: 1.0             # multiplies encoder mm (bias correction)
+#   gain_tolerance: 0.25           # |gain-1| above this disarms detection
+#   pause_on_runout: True
+#   runout_gcode: PAUSE
+#   health_check_interval: 30.0
 #
 # ─── GCODE COMMANDS ───────────────────────────────────────────────────────
 #
-#   Clog Detection:
-#     SFS_STATUS          Show sensor state, health, underextrusion rate
+#     SFS_STATUS          Show state, health, encoder gain, window fill
 #     SFS_ENABLE          Enable clog detection
 #     SFS_DISABLE         Disable clog detection (sensor stays connected)
 #     SFS_RESET           Re-sync extruder position and reset ESP32 odometer
+#     SFS_DIAG            Dump ESP32 calibration + AS5600 registers
 #
-#   Calibration:
 #     SFS_AUTO_CALIBRATE [TEMP=240] [LENGTH=50] [SPEED=100]
-#                                  One-command calibration: heats hotend,
-#                                  extrudes, saves automatically.
-#     SFS_CALIBRATE [LENGTH=10] Manual calibration start. Extrude LENGTH mm
-#                                  then wait 5s or run SFS_CALIBRATE_APPLY.
-#     SFS_CALIBRATE_APPLY       Force-save calibration result immediately
-#     SFS_CALIBRATE_STOP        Cancel active calibration
-#
-#   ESP32 Settings:
-#     SFS_SET SENS=<1-50>       Movement detection sensitivity (encoder steps)
-#     SFS_SET NOISE=<1-20>      Noise filter deadband (encoder steps)
-#     SFS_SET BRIGHT=<1-255>    Status LED brightness
-#     SFS_SET DIR=<1 or -1>     Encoder direction multiplier
-#     SFS_SET CAL=<float>       Calibration factor (deg/mm) — manual override
-#
-#     Multiple parameters can be combined in one command:
-#       SFS_SET SENS=5 NOISE=3 BRIGHT=80
+#     SFS_CALIBRATE [LENGTH=10] / SFS_CALIBRATE_APPLY / SFS_CALIBRATE_STOP
+#     SFS_SET SENS= NOISE= BRIGHT= DIR= CAL=
+#     SFS_MEASURE         1st call resets, extrude, 2nd call shows measured mm
+#     SFS_SUSPEND / SFS_RESUME   Silence the module during probing (nestable)
 #
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -85,10 +128,11 @@ import time
 import glob
 import os
 
-__version__ = "2.9.0"
+__version__ = "3.1.3"
 
 # Expected PING→PONG identifier for auto-detect (avoids grabbing CAN/EBB ports)
 _SFS_IDENTITY = "PONG"
+
 
 class SmartFilamentSensor:
     def __init__(self, config):
@@ -97,7 +141,7 @@ class SmartFilamentSensor:
         self.gcode    = self.printer.lookup_object('gcode')
         self.name     = config.get_name().split()[-1]
 
-        # Config — all decision logic stays here, not on ESP32
+        # ── Config ───────────────────────────────────────────────────────
         self.serial_port      = config.get('serial', 'auto')
         self.baud_rate        = config.getint('baud', 115200)
         self.detection_length = config.getfloat('detection_length', 7.0, above=0.)
@@ -105,77 +149,106 @@ class SmartFilamentSensor:
         self.runout_gcode     = config.get('runout_gcode', 'PAUSE')
         self.underextrusion_max_rate = config.getfloat(
             'underextrusion_max_rate', 0.5, minval=0., maxval=1.)
-        self.underextrusion_period = config.getfloat(
-            'underextrusion_period', 5.0, above=0.)
         self.health_check_interval = config.getfloat(
             'health_check_interval', 30.0, above=0.)
 
-        # Runtime state
+        # Rolling decision window, measured in mm of COMMANDED extrusion.
+        # See the header for why this is not a time window.
+        self.detection_window = config.getfloat(
+            'detection_window', 200.0, above=0.)
+        # Independent floor on evidence count. detection_window alone can be
+        # satisfied by very few reads if detection_length is large.
+        self.min_window_samples = config.getint(
+            'min_window_samples', 8, minval=2)
+
+        # Steady multiplicative correction applied to every encoder reading.
+        # Use only for a bias you have measured and cannot remove by
+        # calibrating the ESP32 itself.
+        self.encoder_scale = config.getfloat(
+            'encoder_scale', 1.0, above=0.)
+        # How far the measured long-run gain may drift from 1.0 before the
+        # module refuses to make clog decisions.
+        self.gain_tolerance = config.getfloat(
+            'gain_tolerance', 0.25, above=0., maxval=1.)
+
+        # Accepted but no longer used for the averaging window; kept so old
+        # configs keep loading. Reused as the staleness gap below.
+        self.sample_gap_timeout = config.getfloat(
+            'underextrusion_period', 30.0, above=0.)
+
+        # ── Runtime state ────────────────────────────────────────────────
         self._serial           = None
         self._serial_lock      = threading.Lock()
         self._enabled          = True
-        self._last_e_pos       = None   # Klipper E position at last check
-        self._pending_expected = None   # mm we expected when we sent GET_MM_RESET
-        self._measure_active   = False  # True between MEASURE start and read
-        self._measure_pending  = False  # True while waiting for MEASURE mm reply
-        self._measure_deadline = 0.0    # give up waiting after this, so a lost
-                                        # reply can't swallow a detection sample
-        self._calibrating      = False  # True while calibration is active
-        self._active_port      = None   # Actual port we connected to
-        self._last_good_port   = None   # Port that passed PING/PONG before —
-                                        # reconnects reuse it instead of
-                                        # re-probing every serial device
+        self._last_e_pos       = None
+        self._pending_expected = None
+        self._measure_active   = False
+        self._measure_pending  = False
+        self._measure_deadline = 0.0
+        self._calibrating      = False
+        self._active_port      = None
+        self._last_good_port   = None
 
-        # Sensor connection tracking
         self._connected        = False
         self._last_response_time = 0.0
-        # Timeout must be > health_check_interval so we don't false-trigger
-        # between periodic HEALTH queries
         self._connection_timeout = self.health_check_interval + 10.0
 
-        # Magnet health tracking
-        self._magnet_state     = 'unknown'  # ok, too_weak, no_magnet
+        self._magnet_state     = 'unknown'
         self._magnet_agc       = 0
+        self._magnet_warned    = False
+        self._esp_cal          = None   # deg/mm reported by the ESP32
+        self._esp_fw           = None   # firmware version string from DIAG
+        self._diag_pending     = False  # waiting for a DIAG reply
 
-        # Underextrusion rate tracking (Roadrunner-style time-based)
-        self._extrusion_samples = []  # list of (timestamp, expected, actual)
-        self._underextrusion_rate = 0.0  # 0.0 = perfect, 1.0 = full clog
-        self._underextrusion_start_time = None  # when rate first exceeded threshold
-        self._runout_triggered = False  # prevent repeated triggers
+        # ── Detection window ─────────────────────────────────────────────
+        # Each entry is (monotonic_time, expected_mm, actual_mm).
+        self._window            = []
+        self._window_expected   = 0.0   # running sum, kept in step with list
+        self._window_actual     = 0.0
+        self._underextrusion_rate = 0.0
+        self._runout_triggered  = False
+        self._last_sample_time  = 0.0
 
-        # Grace period after a reconnect/resync — detection stays off until
-        # this deadline so stale or post-reset encoder data can't fire a clog.
+        # ── Long-run gain measurement ────────────────────────────────────
+        # Lifetime totals since the last SFS_RESET / print start. This is the
+        # number that tells you whether the ESP32 calibration is right.
+        self._gain_expected    = 0.0
+        self._gain_actual      = 0.0
+        self._measured_gain    = None   # None until enough data
+        self._gain_warned      = False
+        # Enough commanded extrusion for the ratio to be meaningful.
+        #
+        # Tied to detection_window on purpose. Gain accumulates from the same
+        # readings as the decision window and is never cleared by a resync, so
+        # matching the two guarantees the gain guard is live the moment the
+        # window first arms. When this was a larger fixed number there was a
+        # band -- window full at 200mm, gain still "measuring" until 300mm --
+        # where _gain_ok() returned True for lack of data and a grossly wrong
+        # reading could pause the print. A reversed encoder direction (gain
+        # -1.0) walked straight through that gap.
+        self._gain_min_mm      = self.detection_window * 0.9
+
+        # Grace period after reconnect/resync
         self._resync_grace_until = 0.0
         self._resync_grace_period = 5.0
 
-        # Homing awareness. _homing stays True for the whole homing/probing
-        # window (extended past each probe point by _probe_grace) so the
-        # module never touches serial/reactor mid-probe.
+        # Homing / probing awareness
         self._homing           = False
         self._probe_clear_at   = None
-        self._probe_grace      = 0.75  # seconds of quiet before resuming
-
-        # Explicit suspension (SFS_SUSPEND/SFS_RESUME), depth-counted for
-        # nested macros. Needed because rapid_scan bed mesh streams the eddy
-        # probe WITHOUT homing moves — homing events never fire, so the
-        # event-based guard above cannot see it. Macros suspend explicitly.
+        self._probe_grace      = 0.75
         self._suspend_depth    = 0
 
-        # Print-state edge detection: on the not-printing -> printing
-        # transition both sides resync (see _extrusion_check)
         self._was_printing     = False
 
-        # Calibration validation — expected range for deg/mm
-        self._cal_min = 3.0   # below this = something very wrong
-        self._cal_max = 50.0  # above this = something very wrong
+        # Calibration sanity range for deg/mm
+        self._cal_min = 3.0
+        self._cal_max = 50.0
 
-        # Reader thread alive tracking (#3 fix)
+        # Reader thread tracking
         self._reader_alive     = False
         self._reader_died      = False
         self._reader_thread    = None
 
-        # Auto-reconnect. Port probing blocks (readline with timeout), so it
-        # runs on a worker thread — never on the reactor thread.
         self._reconnecting     = False
         self._shutting_down    = False
 
@@ -194,16 +267,18 @@ class SmartFilamentSensor:
             desc="Disable detection without disconnecting")
         self.gcode.register_command('SFS_RESET',   self.cmd_RESET,
             desc="Re-sync Klipper position and reset ESP32 odometer")
+        self.gcode.register_command('SFS_DIAG',    self.cmd_DIAG,
+            desc="Dump ESP32 calibration factor and AS5600 registers")
         self.gcode.register_command('SFS_CALIBRATE', self.cmd_CALIBRATE,
             desc="Start ESP32 encoder calibration. Usage: SFS_CALIBRATE [LENGTH=10]")
         self.gcode.register_command('SFS_CALIBRATE_APPLY', self.cmd_CALIBRATE_APPLY,
-            desc="Force-save calibration result immediately (skip the 5s idle timeout)")
+            desc="Force-save calibration result immediately")
         self.gcode.register_command('SFS_CALIBRATE_STOP', self.cmd_CALIBRATE_STOP,
             desc="Cancel active calibration")
         self.gcode.register_command('SFS_SET', self.cmd_SET,
             desc="Change ESP32 settings. Usage: SFS_SET [SENS=] [NOISE=] [BRIGHT=] [DIR=] [CAL=]")
         self.gcode.register_command('SFS_AUTO_CALIBRATE', self.cmd_AUTO_CALIBRATE,
-            desc="Auto calibrate: heat, extrude, save. Usage: SFS_AUTO_CALIBRATE [TEMP=240] [LENGTH=50] [SPEED=100]")
+            desc="Auto calibrate: heat, extrude, save.")
         self.gcode.register_command('SFS_MEASURE', self.cmd_MEASURE,
             desc="Measure mode: 1st call resets, extrude, 2nd call shows measured mm")
         self.gcode.register_command('SFS_SUSPEND', self.cmd_SUSPEND,
@@ -226,7 +301,6 @@ class SmartFilamentSensor:
             settings = self.printer.lookup_object(
                 'configfile').get_status(None)['settings']
         except Exception:
-            # Can't enumerate: assume nothing is safe to blind-probe
             return None
         for section, values in settings.items():
             if section != 'mcu' and not section.startswith('mcu '):
@@ -244,12 +318,7 @@ class SmartFilamentSensor:
         return ports
 
     def _auto_detect_port(self, full_scan=True):
-        """Find the ESP32 serial port. Uses a PING/PONG handshake.
-
-        full_scan=False restricts this to the port we already verified once.
-        Reconnects use that: rescanning would PING every candidate again, and
-        the sensor's by-id path is stable across re-enumeration anyway.
-        """
+        """Find the ESP32 serial port via a PING/PONG handshake."""
         exclude = self._klipper_mcu_ports()
         if exclude is None:
             logging.warning(
@@ -265,7 +334,6 @@ class SmartFilamentSensor:
             except Exception:
                 return False
 
-        # A port we verified before is the only one worth reopening.
         if self._last_good_port and usable(self._last_good_port):
             if self._verify_sensor(self._last_good_port):
                 return self._last_good_port
@@ -273,11 +341,9 @@ class SmartFilamentSensor:
         if not full_scan:
             return None
 
-        # 1. /dev/serial/by-id/ symlinks that look like an ESP32
         candidates = [p for p in sorted(glob.glob('/dev/serial/by-id/*'))
                       if any(k in p.lower()
                              for k in ('esp', 'cp210', 'ch340'))]
-        # 2. Fallback: raw tty devices
         candidates += sorted(
             glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*'))
 
@@ -290,7 +356,6 @@ class SmartFilamentSensor:
             if self._verify_sensor(port):
                 self._last_good_port = port
                 return port
-
         return None
 
     def _verify_sensor(self, port):
@@ -298,12 +363,10 @@ class SmartFilamentSensor:
         test = None
         try:
             test = serial.Serial(port, self.baud_rate, timeout=1.0)
-            # Flush any boot garbage
             test.reset_input_buffer()
             time.sleep(0.1)
             test.reset_input_buffer()
             test.write(b'PING\n')
-            # Read up to 5 lines (skip boot messages)
             for _ in range(5):
                 response = test.readline().decode('utf-8', errors='replace').strip()
                 if response == _SFS_IDENTITY:
@@ -314,8 +377,6 @@ class SmartFilamentSensor:
         except Exception:
             pass
         finally:
-            # Must close on every path — a leaked handle keeps the port busy
-            # and blocks the next probe (and Klipper's own open).
             if test is not None:
                 try:
                     test.close()
@@ -326,17 +387,19 @@ class SmartFilamentSensor:
     def _teardown_serial(self):
         """Close the port and wind down the reader thread.
 
-        Closing the handle unblocks a reader parked in readline(); joining it
-        before we touch connection state stops the dying thread's cleanup from
-        clobbering a fresh connection.
+        Order matters: clear _reader_alive first so the reader stops looping,
+        then close the handle (which unblocks a parked readline()), then join
+        before touching connection state — otherwise the dying thread's
+        cleanup clobbers a fresh connection.
         """
         self._reader_alive = False
-        if self._serial is not None:
+        ser = self._serial
+        self._serial = None
+        if ser is not None:
             try:
-                self._serial.close()
+                ser.close()
             except Exception:
                 pass
-            self._serial = None
         thread = self._reader_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
@@ -344,15 +407,7 @@ class SmartFilamentSensor:
         self._reader_died = False
 
     def _attempt_connect(self, full_scan=True):
-        """Open the sensor port and start reading. Returns True on success.
-
-        Safe to call repeatedly. Blocks while probing ports, so callers must
-        keep it off the reactor thread once Klipper is running.
-
-        full_scan=False limits auto-detect to the already-known port. Used for
-        reconnects, which happen while the printer is live and must not probe
-        anything else.
-        """
+        """Open the sensor port and start reading. Returns True on success."""
         self._teardown_serial()
 
         port = self.serial_port
@@ -365,28 +420,28 @@ class SmartFilamentSensor:
                 return False
 
         try:
-            self._serial = serial.Serial(port, self.baud_rate, timeout=0.1)
+            ser = serial.Serial(port, self.baud_rate, timeout=0.1)
         except Exception as e:
             logging.warning("SmartFilamentSensor '%s': cannot open %s: %s"
                             % (self.name, port, e))
             self._serial = None
             return False
 
+        self._serial = ser
         self._active_port = port
         self._last_good_port = port
         self._last_response_time = time.monotonic()
         self._connected = True
-        # A fresh port means a possibly-rebooted sensor with a zeroed counter
         self._reset_detection_state()
         self.reactor.register_async_callback(self._resync_after_reconnect)
 
         self._reader_alive = True
         self._reader_thread = threading.Thread(
-            target=self._serial_reader, daemon=True)
+            target=self._serial_reader, args=(ser,), daemon=True)
         self._reader_thread.start()
 
-        # Ping now so we have a response before the first health check
         self._send("HEALTH")
+        self._send("GET_CAL")
         logging.info("SmartFilamentSensor '%s': connected to %s"
                      % (self.name, port))
         return True
@@ -399,15 +454,10 @@ class SmartFilamentSensor:
                 "Plug it in — reconnect is automatic, no restart needed."
                 % self.name)
 
-        # Extrusion check timer (250ms for faster response)
         self.reactor.register_timer(
             self._extrusion_check, self.reactor.monotonic() + 2.0)
-
-        # Health check timer (magnet + connection monitoring + reconnect)
         self.reactor.register_timer(
             self._health_check, self.reactor.monotonic() + self.health_check_interval)
-
-        # Probe-suspension release timer (lifts _homing after probing quiets)
         self.reactor.register_timer(
             self._probe_clear_check, self.reactor.monotonic() + 1.0)
 
@@ -419,8 +469,6 @@ class SmartFilamentSensor:
 
         def worker():
             try:
-                # full_scan=False: the printer is live, so probing anything
-                # beyond the known port risks PINGing an MCU
                 if self._attempt_connect(full_scan=False):
                     self.reactor.register_async_callback(
                         lambda et: self.gcode.respond_info(
@@ -445,30 +493,21 @@ class SmartFilamentSensor:
     def _handle_homing_begin(self, hmove):
         # Suspend ALL module activity for the whole homing/probing window.
         # During a probe the host must service trsync within microseconds; any
-        # serial write, get_position(), or reader work from this module can
-        # delay the reactor enough to cause "Unable to obtain trsync_state
-        # response" -> "Missed scheduling" -> EBBCan shutdown. Confirmed by
-        # test: print crashes with detection enabled, passes with it off.
+        # serial write or get_position() from this module can delay the
+        # reactor enough to cause "Unable to obtain trsync_state response".
         self._homing = True
         self._probe_clear_at = None
 
     def _handle_homing_end(self, hmove):
-        # z_tilt / bed mesh fire begin/end per probe point. Keep suspended
-        # through the short gaps between points instead of resuming (and
-        # sending serial) between every tap. A reactor timer lifts suspension
-        # only after the moves actually stop.
+        # z_tilt / bed mesh fire begin/end per probe point. Stay suspended
+        # through the gaps; a reactor timer lifts it once moves actually stop.
         self._probe_clear_at = time.monotonic() + self._probe_grace
-        # No serial here — deferred to _probe_clear_check once probing is done.
 
     def _probe_clear_check(self, eventtime):
-        """Lift homing suspension once probing has been quiet for the grace
-        period, then resync. Runs on the reactor thread."""
         if self._homing and self._probe_clear_at is not None:
             if time.monotonic() >= self._probe_clear_at:
                 self._homing = False
                 self._probe_clear_at = None
-                # Only resync if no explicit suspension is still active —
-                # otherwise SFS_RESUME will do the resync when it clears.
                 if self._suspend_depth == 0:
                     self._reset_detection_state()
                     self._last_e_pos = self._get_e_pos()
@@ -478,67 +517,80 @@ class SmartFilamentSensor:
     # ── Serial I/O ───────────────────────────────────────────────────────────
 
     def _send(self, cmd):
-        if self._serial and self._serial.is_open:
-            with self._serial_lock:
-                try:
-                    self._serial.write((cmd + '\n').encode())
-                except Exception as e:
-                    logging.error("SmartFilamentSensor '%s': write error: %s"
-                                  % (self.name, e))
-                    if self._connected:
-                        self._connected = False
-                        self._reset_detection_state()
-                        self.reactor.register_async_callback(
-                            lambda et: self.gcode.respond_info(
-                                "SmartFilamentSensor '%s': WARNING - sensor "
-                                "disconnected! (write error)" % self.name))
+        ser = self._serial
+        if ser is None:
+            return
+        with self._serial_lock:
+            try:
+                if ser.is_open:
+                    ser.write((cmd + '\n').encode())
+            except Exception as e:
+                logging.error("SmartFilamentSensor '%s': write error: %s"
+                              % (self.name, e))
+                if self._connected:
+                    self._connected = False
+                    self._reset_detection_state()
+                    self.reactor.register_async_callback(
+                        lambda et: self.gcode.respond_info(
+                            "SmartFilamentSensor '%s': WARNING - sensor "
+                            "disconnected! (write error)" % self.name))
 
-    def _serial_reader(self):
-        """Background thread — reads lines from ESP32.
-        If this thread dies, health_check will detect it and warn the user.
+    def _serial_reader(self, ser):
+        """Background thread — reads lines from the ESP32.
+
+        Takes its own serial handle as an argument rather than reading
+        self._serial each iteration. _teardown_serial() sets that attribute
+        to None, and the old code could evaluate `self._serial.is_open` as
+        True and then call readline() on None — the source of the recurring
+        "read error: 'NoneType' object cannot be interpreted as an integer"
+        followed by "reader thread died!" on every FIRMWARE_RESTART.
         """
         try:
             while self._reader_alive:
                 try:
-                    if self._serial and self._serial.is_open:
-                        raw = self._serial.readline()
-                        if raw:
-                            line = raw.decode('utf-8', errors='replace').strip()
-                            if line:
-                                self._handle_line(line)
-                    else:
+                    if not ser.is_open:
                         break
-                except serial.SerialException as e:
-                    logging.error(
-                        "SmartFilamentSensor '%s': serial error: %s"
-                        % (self.name, e))
+                    raw = ser.readline()
+                except (serial.SerialException, OSError, TypeError,
+                        ValueError, AttributeError) as e:
+                    # Port closed under us during shutdown — expected.
+                    if self._reader_alive:
+                        logging.error(
+                            "SmartFilamentSensor '%s': serial error: %s"
+                            % (self.name, e))
                     break
-                except Exception as e:
-                    logging.error(
-                        "SmartFilamentSensor '%s': read error: %s"
-                        % (self.name, e))
+                if not raw:
+                    continue
+                try:
+                    line = raw.decode('utf-8', errors='replace').strip()
+                except Exception:
+                    continue
+                if line:
+                    try:
+                        self._handle_line(line)
+                    except Exception as e:
+                        logging.error(
+                            "SmartFilamentSensor '%s': line handler error: %s"
+                            % (self.name, e))
         finally:
-            # Signal that reader thread has exited
             self._reader_alive = False
-            if self._connected:
+            # Only flag a crash if nobody asked us to stop.
+            if self._connected and not self._shutting_down:
                 self._connected = False
                 self._reader_died = True
                 logging.error(
                     "SmartFilamentSensor '%s': reader thread died!" % self.name)
 
     def _handle_line(self, line):
-        """Called from reader thread. Runs while holding the GIL, so keep it
-        cheap — no per-line disk logging (that stalls the reactor thread if it
-        lands during a probe)."""
-        # Any valid response = sensor is alive
+        """Called from the reader thread. Keep it cheap — no disk logging per
+        line (that stalls the reactor thread if it lands during a probe)."""
         self._last_response_time = time.monotonic()
         if not self._connected:
             self._connected = True
             self._reader_died = False
             # The sensor may have rebooted, which zeroes its encoder counter
             # while Klipper kept accumulating expected extrusion. Throw away
-            # everything from before the gap and re-sync both sides, or the
-            # mismatch reads as underextrusion and pauses the print.
+            # everything from before the gap and re-sync both sides.
             self._reset_detection_state()
             self.reactor.register_async_callback(self._resync_after_reconnect)
             logging.info("SmartFilamentSensor '%s': sensor reconnected, "
@@ -547,30 +599,33 @@ class SmartFilamentSensor:
                 lambda et: self.gcode.respond_info(
                     "SmartFilamentSensor '%s': sensor reconnected" % self.name))
 
-        # Health response
         if line.startswith("HEALTH:"):
-            health = line[7:]
-            if health.startswith("ok:"):
-                self._magnet_state = 'ok'
-                try:
-                    self._magnet_agc = int(health[3:])
-                except ValueError:
-                    self._magnet_agc = 0
-            elif health == "no_magnet":
-                self._magnet_state = 'no_magnet'
-                self._magnet_agc = 0
-                logging.warning(
-                    "SmartFilamentSensor '%s': NO MAGNET DETECTED!"
-                    % self.name)
-                if self._enabled and self._is_printing():
-                    self.reactor.register_async_callback(self._action_magnet_error)
-            elif health == "too_weak":
-                self._magnet_state = 'too_weak'
-                logging.warning(
-                    "SmartFilamentSensor '%s': magnet too weak" % self.name)
+            self._handle_health(line[7:])
             return
 
-        # Forward calibration output to Klipper console
+        if line.startswith("CAL:"):
+            try:
+                self._esp_cal = float(line[4:])
+            except ValueError:
+                pass
+            return
+
+        if line.startswith("DIAG:"):
+            self._diag_pending = False
+            # The dump starts with fw=<version>; remember it so SFS_STATUS can
+            # show which firmware is actually running.
+            for field in line[5:].split(','):
+                key, _, value = field.partition('=')
+                if key == 'fw':
+                    self._esp_fw = value
+                    break
+            msg = line
+            self.reactor.register_async_callback(
+                lambda et, m=msg: self.gcode.respond_info(
+                    "SmartFilamentSensor '%s': %s" % (self.name, m)))
+            return
+
+        # Forward calibration output to the Klipper console
         if self._calibrating:
             if (line.startswith("[CAL]") or
                     line.startswith(">>> CALIBRATION") or
@@ -580,13 +635,13 @@ class SmartFilamentSensor:
                 msg = line
                 self.reactor.register_async_callback(
                     lambda et, m=msg: self.gcode.respond_info(m))
-
-                # Calibration validation (#4)
                 if ">>> New Cal Factor:" in line:
                     self._validate_calibration(line)
-
                 if "CALIBRATION SUCCESS" in line or ">>> ERROR:" in line:
                     self._calibrating = False
+                    # A new cal factor invalidates every accumulated ratio
+                    self._reset_gain_tracking()
+                    self._send("GET_CAL")
                 return
 
         if line.startswith("MM:") and line != "MM:RESET":
@@ -594,109 +649,212 @@ class SmartFilamentSensor:
                 actual_mm = float(line[3:])
             except ValueError:
                 return
+            self._handle_measurement(actual_mm)
 
-            # Measure mode reply — just report raw mm, no detection logic.
-            # Expires: a stale flag would otherwise eat the next detection
-            # reply and stall clog detection indefinitely.
-            if self._measure_pending:
-                if time.monotonic() <= self._measure_deadline:
-                    self._measure_pending = False
-                    # Leave the odometer at zero so the next detection
-                    # window starts clean instead of inheriting the
-                    # measurement session's total
-                    self._send("RESET_MM")
-                    self.reactor.register_async_callback(
-                        lambda et, v=actual_mm: self.gcode.respond_info(
-                            "SFS MEASURE: %.2f mm measured" % v))
-                    return
-                self._measure_pending = False
+    def _handle_health(self, health):
+        # Firmware >= 2.5.0 sends "<state>:<agc>" for every state; older
+        # firmware sent a bare "too_weak" and no too_strong state at all.
+        state, _, agc_txt = health.partition(':')
+        if agc_txt:
+            try:
+                self._magnet_agc = int(agc_txt)
+            except ValueError:
+                self._magnet_agc = 0
 
-            expected = self._pending_expected
-            self._pending_expected = None
-            if expected is None:
-                return
-
-            # Record sample for underextrusion averaging
-            now = time.monotonic()
-            # A long gap since the previous sample (travel moves, pauses)
-            # means the alarm timer was frozen, not accumulating evidence.
-            # Without this reset, one bad sample after a >period gap would
-            # satisfy "elapsed >= period" instantly and pause the print off
-            # a single reading — the exact thing the timer exists to prevent.
-            if (self._extrusion_samples and
-                    now - self._extrusion_samples[-1][0]
-                    > self.underextrusion_period):
-                self._extrusion_samples = []
-                self._underextrusion_start_time = None
-            self._extrusion_samples.append((now, expected, actual_mm))
-            # Prune old samples outside the averaging period
-            cutoff = now - self.underextrusion_period
-            self._extrusion_samples = [
-                s for s in self._extrusion_samples if s[0] >= cutoff]
-            # Calculate rolling underextrusion rate
-            self._update_underextrusion_rate()
-
-            # Log each reading
-            if expected > 0:
-                rate = actual_mm / expected
-            else:
-                rate = 1.0
-            logging.info(
-                "SmartFilamentSensor '%s': expected=%.2fmm actual=%.2fmm "
-                "rate=%.0f%% underextrusion=%.1f%%"
-                % (self.name, expected, actual_mm, rate * 100,
-                   self._underextrusion_rate * 100))
-
-            # Time-based underextrusion detection (Roadrunner-style)
-            # Skipped right after a resync: the first samples span the gap
-            # and would read as underextrusion.
-            if self._enabled and not self._in_resync_grace():
-                self._check_underextrusion(now)
-
-    def _check_underextrusion(self, now):
-        """Time-based clog detection: only pause if underextrusion
-        exceeds threshold continuously for underextrusion_period seconds.
-        Single bad readings are ignored — only sustained problems trigger.
-        """
-        if self._underextrusion_rate > self.underextrusion_max_rate:
-            # Rate is bad — start or continue timer
-            if self._underextrusion_start_time is None:
-                self._underextrusion_start_time = now
-                elapsed = 0.0
-            else:
-                elapsed = now - self._underextrusion_start_time
-
+        if state == 'ok':
+            self._magnet_state = 'ok'
+        elif state == 'no_magnet':
+            self._magnet_state = 'no_magnet'
+            self._magnet_agc = 0
             logging.warning(
-                "SmartFilamentSensor '%s': underextrusion %.1f%% > %.1f%% "
-                "(%.1fs / %.1fs)"
-                % (self.name, self._underextrusion_rate * 100,
-                   self.underextrusion_max_rate * 100,
-                   elapsed, self.underextrusion_period))
+                "SmartFilamentSensor '%s': NO MAGNET DETECTED!" % self.name)
+            if self._enabled and self._is_printing():
+                self.reactor.register_async_callback(self._action_magnet_error)
+        elif state in ('too_weak', 'too_strong'):
+            self._magnet_state = state
+            logging.warning("SmartFilamentSensor '%s': magnet %s (AGC %d)"
+                            % (self.name, state, self._magnet_agc))
+            if not self._magnet_warned:
+                self._magnet_warned = True
+                hint = ("Move the magnet CLOSER." if state == 'too_weak'
+                        else "Increase the AIR GAP -- the magnet is too close.")
+                self.reactor.register_async_callback(
+                    lambda et, s=state, a=self._magnet_agc, h=hint:
+                    self.gcode.respond_info(
+                        "SmartFilamentSensor '%s': magnet %s (AGC %d).\n"
+                        "  %s\n"
+                        "  Ideal AGC is the middle of its range: ~64 at 3.3V "
+                        "(0-128), ~128 at 5V (0-255).\n"
+                        "  Both extremes degrade angle accuracy."
+                        % (self.name, s, a, h)))
+            return
+        self._magnet_warned = False
 
-            if elapsed >= self.underextrusion_period:
-                if not self._runout_triggered:
-                    self._runout_triggered = True
-                    logging.warning(
-                        "SmartFilamentSensor '%s': CLOG CONFIRMED - "
-                        "underextrusion %.1f%% sustained for %.1fs"
-                        % (self.name, self._underextrusion_rate * 100,
-                           elapsed))
-                    if self.pause_on_runout:
-                        self.reactor.register_async_callback(self._action_clog)
-        else:
-            # Rate is OK — reset timer
-            if self._underextrusion_start_time is not None:
-                logging.info(
-                    "SmartFilamentSensor '%s': underextrusion recovered "
-                    "(%.1f%%)" % (self.name,
-                                  self._underextrusion_rate * 100))
-            self._underextrusion_start_time = None
+    def _handle_measurement(self, actual_mm):
+        """A GET_MM / GET_MM_RESET reply arrived."""
+        actual_mm *= self.encoder_scale
+
+        # Measure mode reply — just report raw mm, no detection logic.
+        # Expires: a stale flag would otherwise eat the next detection reply
+        # and stall clog detection indefinitely.
+        if self._measure_pending:
+            if time.monotonic() <= self._measure_deadline:
+                self._measure_pending = False
+                # Leave the odometer at zero so the next detection window
+                # starts clean instead of inheriting the measurement total
+                self._send("RESET_MM")
+                self.reactor.register_async_callback(
+                    lambda et, v=actual_mm: self.gcode.respond_info(
+                        "SFS MEASURE: %.2f mm measured" % v))
+                return
+            self._measure_pending = False
+
+        expected = self._pending_expected
+        self._pending_expected = None
+        if expected is None:
+            return
+
+        now = time.monotonic()
+
+        # A long gap means the window spans a pause, a filament change, or a
+        # travel-only stretch. Evidence from before the gap is not comparable
+        # to evidence after it, so start clean.
+        if self._window and now - self._last_sample_time > self.sample_gap_timeout:
+            self._clear_window()
+        self._last_sample_time = now
+
+        self._window.append((now, expected, actual_mm))
+        self._window_expected += expected
+        self._window_actual += actual_mm
+
+        # Trim from the front until the window holds at most detection_window
+        # mm of commanded extrusion — but never drop below min_window_samples.
+        while (self._window_expected > self.detection_window
+               and len(self._window) > self.min_window_samples):
+            _, e_old, a_old = self._window.pop(0)
+            self._window_expected -= e_old
+            self._window_actual -= a_old
+
+        # Long-run gain tracking (independent of the decision window)
+        self._gain_expected += expected
+        self._gain_actual += actual_mm
+        if self._gain_expected >= self._gain_min_mm:
+            self._measured_gain = self._gain_actual / self._gain_expected
+
+        self._update_underextrusion_rate()
+
+        logging.info(
+            "SmartFilamentSensor '%s': expected=%.2fmm actual=%.2fmm "
+            "rate=%.0f%% | window %.0f/%.0fmm n=%d underextrusion=%.1f%% "
+            "gain=%s"
+            % (self.name, expected, actual_mm,
+               (actual_mm / expected * 100) if expected > 0 else 100.0,
+               self._window_expected, self.detection_window, len(self._window),
+               self._underextrusion_rate * 100,
+               ("%.3f" % self._measured_gain) if self._measured_gain
+               else "n/a"))
+
+        if self._enabled and not self._in_resync_grace():
+            self._check_underextrusion()
+
+    # ── Detection ────────────────────────────────────────────────────────────
+
+    def _update_underextrusion_rate(self):
+        if self._window_expected <= 0:
+            self._underextrusion_rate = 0.0
+            return
+        rate = 1.0 - (self._window_actual / self._window_expected)
+        if rate > 1.0:
+            # Net negative encoder movement across the whole window. With a
+            # 200mm window this needs sustained backward drag; log it and
+            # clamp so the reported number stays physical.
+            logging.warning(
+                "SmartFilamentSensor '%s': window net movement negative "
+                "(expected=%.2f actual=%.2f)"
+                % (self.name, self._window_expected, self._window_actual))
+            rate = 1.0
+        self._underextrusion_rate = max(0.0, rate)
+
+    def _gain_ok(self):
+        """True when the encoder tracks the extruder well enough to judge.
+
+        A steady calibration error is indistinguishable from a partial clog
+        inside a single window, so refuse to decide rather than guess.
+        """
+        if self._measured_gain is None:
+            return True   # not enough data yet; window fill gates us anyway
+        return abs(self._measured_gain - 1.0) <= self.gain_tolerance
+
+    def _window_ready(self):
+        return (len(self._window) >= self.min_window_samples
+                and self._window_expected >= self.detection_window * 0.9)
+
+    def _check_underextrusion(self):
+        """Distance-averaged clog detection.
+
+        No time-based persistence timer: the window itself IS the evidence.
+        It only makes a decision once it holds detection_window mm of
+        commanded extrusion across at least min_window_samples reads, which
+        on a real print is tens of seconds of averaging — long enough for
+        bowden drag to cancel out.
+        """
+        if not self._window_ready():
+            return
+
+        # Never decide before the gain is known. _window_ready() uses a 0.9
+        # factor, so without this an arming window could briefly outrun the
+        # gain measurement and judge a reading the guard below would reject.
+        if self._measured_gain is None:
+            return
+
+        if not self._gain_ok():
+            if not self._gain_warned:
+                self._gain_warned = True
+                g = self._measured_gain
+                # Three distinct faults land here and they need different
+                # first moves, so name the likely one instead of always
+                # saying "calibration".
+                if g < -0.5:
+                    hint = ("The encoder is counting BACKWARDS. Reverse it "
+                            "with SFS_SET DIR=-1 (or DIR=1), then SFS_RESET.")
+                elif abs(g) < 0.1:
+                    hint = ("The encoder is reading almost nothing. Check "
+                            "wiring, magnet position and wheel contact with "
+                            "SFS_DIAG before trusting any reading.")
+                else:
+                    hint = ("Recalibrate with SFS_AUTO_CALIBRATE LENGTH=100, "
+                            "then SFS_RESET. If it comes back low again, the "
+                            "wheel is slipping — check spring pressure and "
+                            "O-ring grip.")
+                self.reactor.register_async_callback(
+                    lambda et, v=g, h=hint: self.gcode.respond_info(
+                        "SmartFilamentSensor '%s': clog detection NOT ARMED.\n"
+                        "  Encoder reads %.0f%% of commanded extrusion "
+                        "(should be ~100%%).\n"
+                        "  This is a sensor/calibration problem, not a clog — "
+                        "the module will not pause the print for it.\n"
+                        "  %s" % (self.name, v * 100, h)))
+            return
+        self._gain_warned = False
+
+        if self._underextrusion_rate <= self.underextrusion_max_rate:
             self._runout_triggered = False
+            return
+
+        if self._runout_triggered:
+            return
+        self._runout_triggered = True
+        logging.warning(
+            "SmartFilamentSensor '%s': CLOG CONFIRMED - underextrusion "
+            "%.1f%% averaged over %.0fmm of commanded extrusion (%d reads)"
+            % (self.name, self._underextrusion_rate * 100,
+               self._window_expected, len(self._window)))
+        if self.pause_on_runout:
+            self.reactor.register_async_callback(self._action_clog)
 
     def _validate_calibration(self, line):
-        """Check if calibration result is reasonable (#4)."""
+        """Check that a calibration result is physically plausible."""
         try:
-            # Parse ">>> New Cal Factor: 12.6178 deg/mm (saved)"
             parts = line.split(':')
             if len(parts) >= 2:
                 val_str = parts[-1].strip().split()[0]
@@ -706,52 +864,41 @@ class SmartFilamentSensor:
                         lambda et, v=cal_value: self.gcode.respond_info(
                             "SmartFilamentSensor '%s': WARNING - calibration "
                             "result %.2f deg/mm is unusual (expected %.0f-%.0f).\n"
-                            "Check: magnet position, encoder direction (SFS_SET DIR=-1), "
-                            "or re-calibrate with longer extrusion."
+                            "Check: magnet position, encoder direction "
+                            "(SFS_SET DIR=-1), or re-calibrate with longer "
+                            "extrusion."
                             % (self.name, v, self._cal_min, self._cal_max)))
         except (ValueError, IndexError):
             pass
 
-    def _update_underextrusion_rate(self):
-        if not self._extrusion_samples:
-            self._underextrusion_rate = 0.0
-            return
-        total_expected = sum(s[1] for s in self._extrusion_samples)
-        total_actual = sum(s[2] for s in self._extrusion_samples)
-        if total_expected > 0:
-            # underextrusion_rate: 0.0 = perfect, 1.0 = total clog.
-            # Clamped to 1.0: a rate above 100% is arithmetically impossible
-            # for real filament movement (it needs a negative total_actual),
-            # so it always means the accounting has desynced rather than the
-            # filament having stopped. Reporting "260% underextrusion" hid
-            # that. Clamping keeps the number meaningful; the log line below
-            # is where a desync shows up.
-            rate = 1.0 - (total_actual / total_expected)
-            if rate > 1.0:
-                logging.warning(
-                    "SmartFilamentSensor '%s': encoder read negative net "
-                    "movement (expected=%.2f actual=%.2f) - accounting "
-                    "desync, not a clog" % (self.name, total_expected,
-                                            total_actual))
-                rate = 1.0
-            self._underextrusion_rate = max(0.0, rate)
-        else:
-            self._underextrusion_rate = 0.0
-
     # ── Extrusion Tracker ────────────────────────────────────────────────────
 
-    def _reset_detection_state(self, grace=True):
-        """Drop accumulated samples and clear the clog timer.
-
-        Called whenever the ESP32 counter and Klipper's expected extrusion
-        can no longer be trusted to line up: sensor disconnect, reconnect
-        (a reboot zeroes the encoder counter), or a lost GET_MM_RESET reply
-        (that reply's filament movement is gone for good, since the counter
-        was already reset on the sensor side).
-        """
-        self._extrusion_samples = []
+    def _clear_window(self):
+        self._window = []
+        self._window_expected = 0.0
+        self._window_actual = 0.0
         self._underextrusion_rate = 0.0
-        self._underextrusion_start_time = None
+
+    def _reset_gain_tracking(self):
+        self._gain_expected = 0.0
+        self._gain_actual = 0.0
+        self._measured_gain = None
+        self._gain_warned = False
+
+    def _reset_detection_state(self, grace=True):
+        """Drop accumulated evidence.
+
+        Called whenever the ESP32 counter and Klipper's expected extrusion can
+        no longer be trusted to line up: disconnect, reconnect (a reboot
+        zeroes the encoder counter), or a lost GET_MM_RESET reply (that
+        reply's movement is gone for good — the counter was already reset on
+        the sensor side).
+
+        Gain tracking deliberately survives this: it is a property of the
+        hardware calibration, not of window alignment, and throwing it away
+        on every probe would mean it never accumulates enough data.
+        """
+        self._clear_window()
         self._runout_triggered = False
         self._pending_expected = None
         if grace:
@@ -782,12 +929,14 @@ class SmartFilamentSensor:
         except Exception:
             return False
 
+    def _silenced(self):
+        """True while the module must not touch serial or the toolhead."""
+        return self._homing or self._suspend_depth > 0
+
     def _extrusion_check(self, eventtime):
-        # Fully inert during homing/probing/suspension: no get_position(),
-        # no serial. This is the reactor-safety guard that stops the module
-        # from delaying trsync during a probe (EBBCan "Missed scheduling").
-        # _homing covers homing moves; _suspend_depth covers rapid_scan mesh
-        # (which streams the eddy probe WITHOUT homing moves).
+        # Fully inert during homing/probing/suspension: no get_position(), no
+        # serial. This is the reactor-safety guard that stops the module from
+        # delaying trsync during a probe (EBBCan "Missed scheduling").
         if self._silenced():
             return eventtime + 0.25
 
@@ -800,8 +949,7 @@ class SmartFilamentSensor:
             return eventtime + 0.25
 
         # Measure mode owns the odometer: a detection window would send
-        # GET_MM_RESET and wipe the measurement the user is in the middle of.
-        # Track E so nothing stale accumulates, open no windows.
+        # GET_MM_RESET and wipe the measurement in progress.
         if self._measure_active or self._measure_pending:
             self._last_e_pos = self._get_e_pos()
             return eventtime + 0.25
@@ -817,11 +965,11 @@ class SmartFilamentSensor:
 
         # Entering the printing state (fresh print, or resume after pause).
         # Anything the encoder counted meanwhile — manual extrudes during a
-        # filament change, purge at resume — never entered `expected`, so
-        # start both sides from zero instead of comparing across the gap.
+        # filament change, purge at resume — never entered `expected`.
         if not self._was_printing:
             self._was_printing = True
             self._reset_detection_state()
+            self._reset_gain_tracking()
             self._last_e_pos = current_e
             self._send("RESET_MM")
             return eventtime + 0.25
@@ -840,21 +988,14 @@ class SmartFilamentSensor:
             self._send("RESET_MM")
             return eventtime + 0.25
 
-        # Retractions are deliberately NOT special-cased. delta is left to
-        # accumulate as *net* movement since the last check, which is exactly
-        # what the encoder counts, so a retract and its unretract cancel on
-        # both sides.
-        #
-        # The previous code advanced _last_e_pos on every negative delta,
-        # which dropped the retraction from `expected` while leaving it in the
-        # encoder's count. The next window then compared, say, -6mm+7mm=+1mm
-        # actual against 7mm expected: a phantom ~86% underextrusion that
-        # paused prints with no clog present.
+        # Retractions are deliberately NOT special-cased. delta accumulates as
+        # *net* movement since the last check, which is exactly what the
+        # encoder counts, so a retract and its unretract cancel on both sides.
         if delta >= self.detection_length:
             # A still-pending request means the previous reply never arrived.
             # The sensor already zeroed its counter for that request, so that
-            # window's filament movement is lost — pairing it with the next
-            # reply would read as underextrusion. Drop it and resync instead.
+            # window's movement is lost — pairing it with the next reply would
+            # read as underextrusion. Drop it and resync instead.
             if self._pending_expected is not None:
                 logging.warning(
                     "SmartFilamentSensor '%s': GET_MM_RESET reply lost, "
@@ -865,8 +1006,6 @@ class SmartFilamentSensor:
                 self._last_e_pos = current_e
                 return eventtime + 0.25
 
-            # Ask ESP32 how much filament actually moved; it resets its own
-            # counter atomically so we don't race with continued movement.
             self._pending_expected = delta
             self._send("GET_MM_RESET")
             self._last_e_pos = current_e
@@ -876,12 +1015,9 @@ class SmartFilamentSensor:
     # ── Health Check Timer ───────────────────────────────────────────────────
 
     def _health_check(self, eventtime):
-        # Silenced during homing/probing/suspension: no serial writes near
-        # a probe. Reschedule soon so monitoring resumes right after.
         if self._silenced():
             return eventtime + 1.0
 
-        # Check if reader thread died (#3)
         if self._reader_died and self._connected:
             self._connected = False
             self._reader_died = False
@@ -892,53 +1028,49 @@ class SmartFilamentSensor:
             self.reactor.register_async_callback(
                 lambda et: self.gcode.respond_info(
                     "SmartFilamentSensor '%s': WARNING - serial reader "
-                    "crashed, attempting automatic reconnect..."
-                    % self.name))
+                    "crashed, attempting automatic reconnect..." % self.name))
 
         # Not connected: retry on a worker thread. A USB re-enumeration
-        # invalidates the old handle, so reopening is the only way back —
-        # otherwise the sensor stays dead until FIRMWARE_RESTART.
+        # invalidates the old handle, so reopening is the only way back.
         if not self._connected:
             self._start_reconnect()
             return eventtime + self.health_check_interval
 
-        # Check sensor connection timeout
-        if self._connected:
-            now = time.monotonic()
-            if now - self._last_response_time > self._connection_timeout:
-                self._connected = False
-                # Samples from before/during the dropout can't be trusted
-                self._reset_detection_state()
-                logging.warning(
-                    "SmartFilamentSensor '%s': sensor disconnected "
-                    "(no response for %.0fs)"
-                    % (self.name, self._connection_timeout))
-                self.reactor.register_async_callback(
-                    lambda et: self.gcode.respond_info(
-                        "SmartFilamentSensor '%s': WARNING - sensor "
-                        "disconnected! Check USB connection." % self.name))
+        now = time.monotonic()
+        if now - self._last_response_time > self._connection_timeout:
+            self._connected = False
+            self._reset_detection_state()
+            logging.warning(
+                "SmartFilamentSensor '%s': sensor disconnected "
+                "(no response for %.0fs)"
+                % (self.name, self._connection_timeout))
+            self.reactor.register_async_callback(
+                lambda et: self.gcode.respond_info(
+                    "SmartFilamentSensor '%s': WARNING - sensor "
+                    "disconnected! Check USB connection." % self.name))
 
-        # Calibration check at print start (#5)
         if self._is_printing() and self._connected:
             if self._magnet_state == 'unknown':
-                # First print since boot, haven't received HEALTH yet
                 self._send("HEALTH")
+            if self._esp_cal is None:
+                self._send("GET_CAL")
 
-        # Request magnet health from ESP32
         self._send("HEALTH")
-
         return eventtime + self.health_check_interval
 
     # ── Gcode Actions ────────────────────────────────────────────────────────
 
     def _action_clog(self, eventtime):
-        logging.info("SmartFilamentSensor '%s': executing runout gcode" % self.name)
+        logging.info("SmartFilamentSensor '%s': executing runout gcode"
+                     % self.name)
         try:
             self.gcode.respond_info(
-                "SmartFilamentSensor '%s': CLOG/RUNOUT detected! "
-                "Underextrusion %.1f%% for %.1fs. Pausing print..."
+                "SmartFilamentSensor '%s': CLOG/RUNOUT detected!\n"
+                "  Underextrusion %.1f%% averaged over %.0fmm of commanded "
+                "extrusion (%d reads).\n"
+                "  Pausing print..."
                 % (self.name, self._underextrusion_rate * 100,
-                   self.underextrusion_period))
+                   self._window_expected, len(self._window)))
             self.gcode.run_script(self.runout_gcode)
         except Exception as e:
             logging.error("SmartFilamentSensor '%s': runout gcode failed: %s"
@@ -968,8 +1100,16 @@ class SmartFilamentSensor:
             'magnet_agc': self._magnet_agc,
             'underextrusion_rate': round(self._underextrusion_rate, 4),
             'underextrusion_max_rate': self.underextrusion_max_rate,
-            'underextrusion_alarming': self._underextrusion_start_time is not None,
             'detection_length': self.detection_length,
+            'detection_window': self.detection_window,
+            'window_filled_mm': round(self._window_expected, 1),
+            'window_samples': len(self._window),
+            'detection_armed': self._window_ready() and self._gain_ok(),
+            'encoder_gain': (round(self._measured_gain, 4)
+                             if self._measured_gain is not None else None),
+            'encoder_scale': self.encoder_scale,
+            'esp_cal_deg_per_mm': self._esp_cal,
+            'esp_firmware': self._esp_fw,
             'is_printing': self._is_printing(),
             'is_homing': self._homing,
         }
@@ -977,8 +1117,7 @@ class SmartFilamentSensor:
     # ── GCode Commands ───────────────────────────────────────────────────────
 
     def _require_connected(self, gcmd):
-        """Check if sensor is connected. Returns True if OK, False if not."""
-        if self._serial and not self._serial.is_open:
+        if self._serial is not None and not self._serial.is_open:
             self._connected = False
         if not self._connected:
             port_info = self._active_port or self.serial_port
@@ -990,35 +1129,77 @@ class SmartFilamentSensor:
         return True
 
     def cmd_STATUS(self, gcmd):
-        # Update connection state
-        if self._serial and not self._serial.is_open:
+        if self._serial is not None and not self._serial.is_open:
             self._connected = False
         port_info = self._active_port or self.serial_port
         e     = self._get_e_pos()
         last  = self._last_e_pos
-        if e is None or last is None:
-            since = 0.0
+        since = 0.0 if (e is None or last is None) else e - last
+
+        if self._measured_gain is None:
+            gain_txt = ("measuring... (%.0f/%.0f mm)"
+                        % (self._gain_expected, self._gain_min_mm))
         else:
-            since = e - last
+            gain_txt = "%.3f" % self._measured_gain
+            if not self._gain_ok():
+                gain_txt += "  <== OUT OF RANGE, detection disarmed"
+
+        if not self._window_ready():
+            armed = ("filling window (%.0f/%.0f mm, %d/%d reads)"
+                     % (self._window_expected, self.detection_window,
+                        len(self._window), self.min_window_samples))
+        elif not self._gain_ok():
+            armed = "NO - encoder gain out of range"
+        elif not self._enabled:
+            armed = "NO - detection disabled"
+        else:
+            armed = "YES"
+
         gcmd.respond_info(
             "SmartFilamentSensor '%s'  (v%s):\n"
-            "  port=%s  sensor_connected=%s\n"
+            "  port=%s  sensor_connected=%s  esp_fw=%s\n"
             "  enabled=%s  printing=%s  homing=%s\n"
-            "  magnet=%s (AGC:%d)\n"
-            "  detection_length=%.1fmm\n"
-            "  underextrusion=%.1f%% (max:%.0f%%, period:%.0fs)\n"
-            "  underextrusion_timer=%s\n"
+            "  magnet=%s (AGC:%d, ideal ~64 at 3.3V)  esp_cal=%s deg/mm\n"
+            "  detection_length=%.1fmm  detection_window=%.0fmm\n"
+            "  encoder_gain=%s  (encoder_scale=%.3f)\n"
+            "  underextrusion=%.1f%%  (trips above %.0f%%)\n"
+            "  armed=%s\n"
             "  since_last_check=%.2fmm"
             % (self.name, __version__, port_info, self._connected,
-               self._enabled, self._is_printing(),
-               self._homing, self._magnet_state,
-               self._magnet_agc, self.detection_length,
+               self._esp_fw or "?",
+               self._enabled, self._is_printing(), self._homing,
+               self._magnet_state, self._magnet_agc,
+               ("%.4f" % self._esp_cal) if self._esp_cal else "?",
+               self.detection_length, self.detection_window,
+               gain_txt, self.encoder_scale,
                self._underextrusion_rate * 100,
                self.underextrusion_max_rate * 100,
-               self.underextrusion_period,
-               ("%.1fs" % (time.monotonic() - self._underextrusion_start_time)
-                if self._underextrusion_start_time else "idle"),
-               since))
+               armed, since))
+
+    def cmd_DIAG(self, gcmd):
+        if not self._require_connected(gcmd):
+            return
+        self._diag_pending = True
+        self._send("GET_CAL")
+        self._send("DIAG")
+        gcmd.respond_info(
+            "SmartFilamentSensor '%s': reading diagnostics..." % self.name)
+        # Warn only if the sensor actually stays silent. The old code printed
+        # "if nothing follows, your firmware is too old" unconditionally,
+        # which is confusing to read directly above a DIAG dump that did
+        # arrive — and doubly so once the firmware is newer than the version
+        # named in the warning.
+        self.reactor.register_timer(
+            self._diag_timeout, self.reactor.monotonic() + 2.0)
+
+    def _diag_timeout(self, eventtime):
+        if self._diag_pending:
+            self._diag_pending = False
+            self.gcode.respond_info(
+                "SmartFilamentSensor '%s': no DIAG reply from the sensor.\n"
+                "  DIAG was added in ESP32 firmware 2.4.0 — flash a current "
+                "build to use it." % self.name)
+        return self.reactor.NEVER
 
     def cmd_SUSPEND(self, gcmd):
         self._suspend_depth += 1
@@ -1029,7 +1210,6 @@ class SmartFilamentSensor:
         if self._suspend_depth > 0:
             self._suspend_depth -= 1
         if self._suspend_depth == 0:
-            # Fully resumed — both sides may have drifted while silent
             self._reset_detection_state()
             self._last_e_pos = self._get_e_pos()
             if self._connected:
@@ -1037,14 +1217,11 @@ class SmartFilamentSensor:
             logging.info("SmartFilamentSensor '%s': resumed, resynced"
                          % self.name)
 
-    def _silenced(self):
-        """True while the module must not touch serial or the toolhead."""
-        return self._homing or self._suspend_depth > 0
-
     def cmd_ENABLE(self, gcmd):
         if not self._require_connected(gcmd):
             return
         self._enabled = True
+        self._reset_detection_state()
         self._last_e_pos = self._get_e_pos()
         self._send("RESET_MM")
         gcmd.respond_info("SmartFilamentSensor '%s': enabled" % self.name)
@@ -1057,9 +1234,13 @@ class SmartFilamentSensor:
         if not self._require_connected(gcmd):
             return
         self._reset_detection_state()
+        self._reset_gain_tracking()
         self._last_e_pos = self._get_e_pos()
         self._send("RESET_MM")
-        gcmd.respond_info("SmartFilamentSensor '%s': re-synced" % self.name)
+        self._send("GET_CAL")
+        gcmd.respond_info(
+            "SmartFilamentSensor '%s': re-synced, gain measurement restarted"
+            % self.name)
 
     def cmd_MEASURE(self, gcmd):
         # Manual measure - works without printing state.
@@ -1068,8 +1249,6 @@ class SmartFilamentSensor:
             return
         if not self._measure_active:
             # RESET_MM zeroes the same odometer detection windows read from.
-            # Clear detection state (with grace) so a window opened before
-            # this command can't pair its expected mm with a zeroed counter.
             self._reset_detection_state()
             self._send("RESET_MM")
             self._measure_active = True
@@ -1080,8 +1259,6 @@ class SmartFilamentSensor:
             self._measure_active = False
             self._measure_pending = True
             self._measure_deadline = time.monotonic() + 5.0
-            # The GET_MM reply must pair with the measure request, not with a
-            # detection window that opened in between
             self._reset_detection_state()
             self._send("GET_MM")
             gcmd.respond_info("SFS MEASURE: reading encoder...")
@@ -1137,12 +1314,19 @@ class SmartFilamentSensor:
         direction = gcmd.get_int('DIR', None)
         if direction is not None:
             self._send("SET DIR %d" % direction)
+            # Flipping direction negates every future reading, so anything
+            # accumulated under the old sign is worse than useless -- averaging
+            # the two together hides the change instead of showing it.
+            self._reset_detection_state()
+            self._reset_gain_tracking()
             sent.append("DIR=%d" % direction)
         cal = gcmd.get_float('CAL', None)
         if cal is not None:
             self._send("SET CAL %.4f" % cal)
+            self._reset_gain_tracking()
             sent.append("CAL=%.4f" % cal)
         if sent:
+            self._send("GET_CAL")
             gcmd.respond_info(
                 "SmartFilamentSensor '%s': set %s"
                 % (self.name, ", ".join(sent)))
@@ -1153,11 +1337,16 @@ class SmartFilamentSensor:
                 % self.name)
 
     def cmd_AUTO_CALIBRATE(self, gcmd):
-        """One-command calibration: heat hotend, extrude, auto-save."""
+        """One-command calibration: heat hotend, extrude, auto-save.
+
+        LENGTH defaults to 100mm rather than 50: the encoder wheel is ~29mm
+        of filament per revolution, so a short extrude samples only part of a
+        turn and any per-revolution error folds straight into the result.
+        """
         if not self._require_connected(gcmd):
             return
         temp = gcmd.get_float('TEMP', 240., above=0.)
-        length = gcmd.get_float('LENGTH', 50., above=0.)
+        length = gcmd.get_float('LENGTH', 100., above=0.)
         speed = gcmd.get_float('SPEED', 100., above=0.)  # mm/min
 
         gcmd.respond_info(
@@ -1167,37 +1356,32 @@ class SmartFilamentSensor:
             % (self.name, temp, length, speed))
 
         try:
-            # Heat and wait
-            self.gcode.run_script_from_command(
-                "M109 S%.0f" % temp)
+            self.gcode.run_script_from_command("M109 S%.0f" % temp)
 
-            # Start calibration on ESP32
             self._calibrating = True
             self._send("START %.1f" % length)
             gcmd.respond_info(
                 "SmartFilamentSensor '%s': hotend ready, extruding %.0fmm..."
                 % (self.name, length))
 
-            # Extrude (relative mode)
             self.gcode.run_script_from_command("M83")
             self.gcode.run_script_from_command(
                 "G1 E%.1f F%.0f" % (length, speed))
-
-            # Wait for filament to stop + auto-save (6s should be enough)
             self.gcode.run_script_from_command("G4 P6000")
 
-            # If still calibrating (auto-save didn't trigger), force apply
             if self._calibrating:
                 self._send("APPLY")
                 gcmd.respond_info(
                     "SmartFilamentSensor '%s': extrusion complete, "
                     "applying calibration..." % self.name)
-                # Give ESP32 time to process
                 self.gcode.run_script_from_command("G4 P2000")
 
+            self._reset_gain_tracking()
+            self._send("GET_CAL")
             gcmd.respond_info(
-                "SmartFilamentSensor '%s': auto calibration finished!\n"
-                "Check the result above. Run SFS_STATUS to verify."
+                "SmartFilamentSensor '%s': auto calibration finished.\n"
+                "  Gain measurement restarted — run a print and check\n"
+                "  SFS_STATUS: encoder_gain should settle near 1.000."
                 % self.name)
         except Exception as e:
             self._calibrating = False
@@ -1208,6 +1392,7 @@ class SmartFilamentSensor:
 
 def load_config(config):
     return SmartFilamentSensor(config)
+
 
 def load_config_prefix(config):
     return SmartFilamentSensor(config)

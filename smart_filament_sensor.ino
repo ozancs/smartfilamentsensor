@@ -8,7 +8,7 @@
 #define SCL_PIN 5
 #define NEO_PIN 2
 #define NUM_LEDS 1
-#define FW_VERSION "2.3.0"
+#define FW_VERSION "2.5.0"
 
 Preferences prefs;
 AS5600 as5600;
@@ -51,8 +51,19 @@ double calculateDistance(long long steps) {
 }
 
 // ── LED Animation Engine (FastLED, ultra-smooth) ──
+//
+// Rate-limited to LED_FPS. FastLED.show() disables interrupts while it
+// bit-bangs the WS2812 line and then waits out the reset latch; calling it
+// on every loop iteration spent most of the loop budget on an LED nobody can
+// see change faster than ~60Hz, and stole time from encoder polling. The
+// encoder is read every iteration regardless -- only the LED is throttled.
+static unsigned long lastLedUpdate = 0;
+const unsigned long LED_INTERVAL_MS = 1000 / 60;   // 60 FPS
+
 void updateLed() {
     unsigned long now = millis();
+    if (now - lastLedUpdate < LED_INTERVAL_MS) return;
+    lastLedUpdate = now;
     
     if (test_active) {
         // CALIBRATION: Smooth fade to warm yellow
@@ -114,6 +125,9 @@ void printHelp() {
     Serial.println("║  GET_MM_RESET    Get mm and atomically reset counter  ║");
     Serial.println("║  RESET_MM        Reset odometer counter               ║");
     Serial.println("║  HEALTH          Report magnet health (ok/weak/strong)║");
+    Serial.println("║  GET_CAL         Report calibration factor (deg/mm)   ║");
+    Serial.println("║  GET_STEPS       Report raw encoder steps             ║");
+    Serial.println("║  DIAG            Dump AS5600 registers (diagnostics)  ║");
     Serial.println("║                                                     ║");
     Serial.println("║  SETTINGS:                                          ║");
     Serial.println("║  ─────────────────────────────────────────────────  ║");
@@ -168,11 +182,16 @@ void setup() {
     Wire.setClock(400000); 
     as5600.begin();
     
-    // AS5600 Configuration for maximum responsiveness
-    as5600.setWatchDog(0);     // Always-on mode
-    as5600.setSlowFilter(0);   // No slow filtering
-    as5600.setFastFilter(0);   // No fast filtering  
-    as5600.setHysteresis(0);   // No hardware hysteresis (we handle in software)
+    // AS5600 Configuration for maximum responsiveness.
+    //
+    // setSlowFilter takes the raw SF bit pattern, NOT a "level". Per the
+    // AS5600 datasheet CONF[1:0]: 0 = 16x, 1 = 8x, 2 = 4x, 3 = 2x. Passing 0
+    // therefore selected the SLOWEST, most heavily filtered mode -- the exact
+    // opposite of the old comment. 3 = 2x is the minimum filtering.
+    as5600.setWatchDog(0);     // Always-on mode (no low-power sleep)
+    as5600.setSlowFilter(3);   // 2x = minimum slow filtering
+    as5600.setFastFilter(0);   // 0 = slow filter only (fast filter disabled)
+    as5600.setHysteresis(0);   // No hardware hysteresis (handled in software)
     
     // FastLED setup
     FastLED.addLeds<WS2812B, NEO_PIN, GRB>(leds, NUM_LEDS);
@@ -192,10 +211,10 @@ void setup() {
     
     // Warmup: read a few times to stabilize
     for (int i = 0; i < 5; i++) {
-        as5600.readAngle();
+        as5600.rawAngle();
         delay(2);
     }
-    lastAngle = as5600.readAngle();
+    lastAngle = as5600.rawAngle();
     lastMoveTime = millis();
     lastMoveLedTime = 0; // Start in idle mode
     
@@ -205,8 +224,15 @@ void setup() {
         Serial.println(">>> WARNING: No magnet detected! Check sensor positioning.");
     } else {
         uint8_t agc = as5600.readAGC();
-        if (agc > 240) Serial.println(">>> WARNING: Magnet too weak! Move it closer.");
-        else Serial.printf(">>> Magnet OK (AGC: %d)\n", agc);
+        // At 3.3V the AGC range is 0-128 and the ideal value is the middle
+        // of it (~64). Both extremes hurt accuracy, so report both.
+        if (as5600.magnetTooWeak()) {
+            Serial.printf(">>> WARNING: Magnet too weak (AGC %d)! Move it closer.\n", agc);
+        } else if (as5600.magnetTooStrong()) {
+            Serial.printf(">>> WARNING: Magnet too strong (AGC %d)! Increase the air gap.\n", agc);
+        } else {
+            Serial.printf(">>> Magnet OK (AGC: %d, ideal ~64 at 3.3V)\n", agc);
+        }
     }
     Serial.println(">>> Type 'HELP' or '?' for commands.\n");
 }
@@ -246,16 +272,56 @@ void loop() {
             odometer_reset_steps = global_steps;
             Serial.printf("MM:%.4f\n", measured);
         }
+        else if (upperInput == "GET_CAL") {
+            // Machine-readable calibration factor. Klipper needs this to tell
+            // "the encoder is slipping" apart from "the stored deg/mm is
+            // wrong" -- previously the value was only visible in the human
+            // STATUS block, which the Klipper module does not parse.
+            Serial.printf("CAL:%.4f\n", degrees_per_mm);
+        }
+        else if (upperInput == "DIAG") {
+            // Full AS5600 register dump on one machine-readable line.
+            // ZPOS/MPOS/MANG non-default => readAngle() would have been
+            // scaled; CONF holds the filter/hysteresis/watchdog bits; ZMCO
+            // counts how many times the chip has been permanently burned.
+            Serial.printf(
+                "DIAG:fw=%s,cal=%.4f,dir=%d,noise=%d,sens=%d,"
+                "zmco=%u,zpos=%u,mpos=%u,mang=%u,conf=0x%04X,"
+                "agc=%u,mag=%u,magnet=%u,steps=%lld\n",
+                FW_VERSION, degrees_per_mm, direction_multiplier,
+                noise_threshold, sensitivity,
+                (unsigned)as5600.getZMCO(), (unsigned)as5600.getZPosition(),
+                (unsigned)as5600.getMPosition(), (unsigned)as5600.getMaxAngle(),
+                (unsigned)as5600.getConfiguration(),
+                (unsigned)as5600.readAGC(), (unsigned)as5600.readMagnitude(),
+                (unsigned)(as5600.detectMagnet() ? 1 : 0), global_steps);
+        }
+        else if (upperInput == "GET_STEPS") {
+            // Raw encoder steps since the last odometer reset. Lets the host
+            // recompute mm with any deg/mm without reflashing.
+            Serial.printf("STEPS:%lld\n", global_steps - odometer_reset_steps);
+        }
         else if (upperInput == "HEALTH") {
-            // Report magnet health for Klipper monitoring
-            // AGC 0 = fully saturated (too strong), AGC 255 = no signal (too weak)
-            // AS5600 auto-adjusts gain — only extremes are actual problems
+            // Report magnet health for Klipper monitoring.
+            //
+            // The old code tested `agc > 240` for "too weak". That test can
+            // never fire on this board: the AS5600 AGC range is 0-255 at 5V
+            // but only 0-128 at 3.3V, and the ESP32-C3 runs the sensor at
+            // 3.3V. So the weak-magnet warning was dead code, and there was
+            // no strong-magnet warning at all -- an AGC pinned at 0 (magnet
+            // far too close) reported "ok".
+            //
+            // Use the chip's own MH / ML status bits instead of guessing
+            // from AGC. Per the datasheet the ideal AGC sits in the MIDDLE
+            // of its range, so ~64 at 3.3V; adjust the air gap to get there.
             bool detected = as5600.detectMagnet();
             uint8_t agc = as5600.readAGC();
             if (!detected) {
                 Serial.println("HEALTH:no_magnet");
-            } else if (agc > 240) {
-                Serial.println("HEALTH:too_weak");
+            } else if (as5600.magnetTooWeak()) {
+                Serial.printf("HEALTH:too_weak:%d\n", agc);
+            } else if (as5600.magnetTooStrong()) {
+                Serial.printf("HEALTH:too_strong:%d\n", agc);
             } else {
                 Serial.printf("HEALTH:ok:%d\n", agc);
             }
@@ -273,6 +339,7 @@ void loop() {
                         Serial.printf("\n>>> CALIBRATION SUCCESS!\n");
                         Serial.printf(">>> Measured: %.2f mm | Target: %.1f mm\n", measured_mm, test_target);
                         Serial.printf(">>> New Cal Factor: %.4f deg/mm (saved)\n", degrees_per_mm);
+                Serial.printf("CAL:%.4f\n", degrees_per_mm);
                     } else {
                         Serial.println("\n>>> ERROR: Calibration result too far off. Try again.");
                         Serial.printf(">>> Measured: %.2f mm | Target: %.1f mm | Correction: %.2fx\n", measured_mm, test_target, correction);
@@ -330,6 +397,7 @@ void loop() {
                 degrees_per_mm = val;
                 prefs.putFloat("cal", degrees_per_mm);
                 Serial.printf(">>> Calibration factor set to %.4f deg/mm (saved)\n", degrees_per_mm);
+                Serial.printf("CAL:%.4f\n", degrees_per_mm);
             } else {
                 Serial.println(">>> ERROR: Cal factor must be between 0.01 and 1000.0");
             }
@@ -387,7 +455,17 @@ void loop() {
     }
 
     // ── 2. Encoder Reading ──
-    uint16_t currentAngle = as5600.readAngle();
+    //
+    // rawAngle(), NOT readAngle(). readAngle() returns the ANGLE register,
+    // which the chip scales and clamps according to ZPOS / MPOS / MANG. If
+    // those registers hold anything other than defaults, part of every
+    // revolution saturates at 0 or 4095 and those encoder steps are lost for
+    // good -- a constant multiplicative under-read that looks exactly like a
+    // partial clog and that calibration cannot reliably compensate (the loss
+    // depends on where in the revolution you start). rawAngle() is the
+    // unprocessed 12-bit reading and is immune to all of it. Run DIAG to see
+    // what those registers actually contain.
+    uint16_t currentAngle = as5600.rawAngle();
     int rawDelta = (int)currentAngle - (int)lastAngle;
 
     // Handle 12-bit rollover
@@ -450,6 +528,7 @@ void loop() {
                 Serial.printf("\n>>> CALIBRATION SUCCESS!\n");
                 Serial.printf(">>> Measured: %.2f mm | Target: %.1f mm\n", measured_mm, test_target);
                 Serial.printf(">>> New Cal Factor: %.4f deg/mm (saved)\n", degrees_per_mm);
+                Serial.printf("CAL:%.4f\n", degrees_per_mm);
             } else {
                 Serial.println("\n>>> ERROR: Calibration result too far off. Try again.");
                 Serial.printf(">>> Measured: %.2f mm | Target: %.1f mm | Correction: %.2fx\n", measured_mm, test_target, correction);

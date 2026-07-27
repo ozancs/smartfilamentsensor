@@ -176,17 +176,25 @@ cp klipper_guide/smart_filament_sensor.py ~/klipper/klippy/extras/
 sudo systemctl restart klipper
 ```
 
+`cp` is correct here — this copies out of the cloned repo, which must keep its
+own copy for `git pull` / update_manager to work. If you instead uploaded the
+file through Mainsail/Fluidd, use `mv` so no stray copy is left in your config
+folder.
+
 Add to `printer.cfg`:
 ```ini
 [smart_filament_sensor my_sensor]
-serial: /dev/ttyUSB0
+serial: auto                    # or a fixed /dev/serial/by-id/... path
 baud: 115200
-detection_length: 7.0        # mm between clog checks
-tolerance: 2.0                # max deviation before clog
-pause_on_clog: True
-clog_gcode: PAUSE
-underextrusion_period: 10.0   # seconds to average underextrusion rate
-health_check_interval: 30.0   # seconds between magnet health checks
+detection_length: 7.0           # mm of extrusion per encoder read
+detection_window: 200.0         # mm of extrusion averaged per clog decision
+underextrusion_max_rate: 0.5    # deficit that counts as a clog
+min_window_samples: 8           # reads required before deciding
+encoder_scale: 1.0              # encoder mm multiplier (bias correction)
+gain_tolerance: 0.25            # |gain-1| above this disarms detection
+pause_on_runout: True
+runout_gcode: PAUSE
+health_check_interval: 30.0     # seconds between magnet health checks
 ```
 
 ---
@@ -197,7 +205,7 @@ health_check_interval: 30.0   # seconds between magnet health checks
 |---|---|
 | Sensor not detected on USB | Make sure **USB CDC On Boot** is enabled in Arduino IDE. Reflash if needed. |
 | No magnet detected (warning on boot) | Check magnet is centered in the holder, AS5600 air gap is 1-2mm. |
-| Magnet too strong / too weak | Adjust the distance between AS5600 and magnet. Check AGC value in STATUS. |
+| Magnet too strong / too weak | Adjust the AS5600-to-magnet air gap. Run `SFS_DIAG`: ideal AGC is the MIDDLE of its range (~64 at 3.3V, ~128 at 5V). AGC pinned at 0 means the magnet is too close. |
 | Inconsistent readings | Re-calibrate with a longer distance (100mm). Check O-ring grip and bearing spin. |
 | Spring too stiff | Trim the compression spring shorter. |
 | PTFE fittings loose | Wrap thread tape around the fitting threads. |

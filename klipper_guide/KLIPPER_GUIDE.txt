@@ -1,10 +1,17 @@
 ===============================================================================
-  SMART FILAMENT SENSOR (SFS) — Klipper Integration Guide v2.5
+  SMART FILAMENT SENSOR (SFS) — Klipper Integration Guide v3.1.2
 ===============================================================================
 
   ESP32 + AS5600 encoder based filament sensor with native Klipper module.
   ESP32 only measures filament movement. All underextrusion detection
   and pause logic runs inside Klipper.
+
+  v3 CHANGE: clog decisions are averaged over DISTANCE (mm of commanded
+  extrusion), not over seconds. The sensor is frame-mounted and reaches the
+  toolhead through a bowden tube, so toolhead motion drags filament back and
+  forth through the encoder -- single reads swing from -13.8mm to +17.2mm
+  against a 7mm command. That drag averages out over distance; a clog does
+  not. See "DETECTION TUNING" below.
 
 
 ===============================================================================
@@ -30,19 +37,32 @@
   Option B — Manual install:
 
     1. Upload smart_filament_sensor.py via Mainsail/Fluidd (Machine tab)
-    2. SSH: cp ~/printer_data/config/smart_filament_sensor.py ~/klipper/klippy/extras/
+    2. SSH: mv ~/printer_data/config/smart_filament_sensor.py ~/klipper/klippy/extras/
+
+       mv, not cp. A leftover copy in the config folder appears in the
+       Mainsail/Fluidd file list as though it were a config file, and
+       editing that copy does nothing -- Klipper loads klippy/extras/.
 
   Then add to printer.cfg:
 
     [smart_filament_sensor sfs]
-    serial: auto
+    serial: auto                    # fixed by-id path strongly recommended
     baud: 115200
-    detection_length: 7.0
+    detection_length: 7.0           # mm of extrusion per encoder read
+    detection_window: 200.0         # mm of extrusion averaged per decision
+    underextrusion_max_rate: 0.5    # deficit that counts as a clog
+    min_window_samples: 8           # reads required before deciding
+    encoder_scale: 1.0              # encoder mm multiplier (bias correction)
+    gain_tolerance: 0.25            # |gain-1| above this disarms detection
     pause_on_runout: True
     runout_gcode: PAUSE
-    underextrusion_max_rate: 0.5
-    underextrusion_period: 5.0
     health_check_interval: 30.0
+
+  UPGRADING FROM v2.x:
+    underextrusion_period is no longer the averaging window. Replace it with
+    detection_window (millimetres). Old configs still load -- the value is
+    reused as a sample-staleness timeout -- but it no longer does what its
+    name says.
 
   Step 4 — Restart Klipper:
 
@@ -299,3 +319,102 @@
     - Plug in sensor and run FIRMWARE_RESTART
 
 ===============================================================================
+
+
+===============================================================================
+  DETECTION TUNING
+===============================================================================
+
+  detection_window (mm of commanded extrusion averaged per decision)
+
+    Bowden drag is bounded in millimetres, so its relative contribution
+    shrinks as the window grows. A clog reads ~100% deficit at any window
+    size. Worst false reading produced by drag alone, measured on real logs:
+
+        25 mm  -> 260 %        150 mm ->  58 %
+        50 mm  -> 106 %        200 mm ->  41 %   <- default
+       100 mm  ->  88 %        300 mm ->  26 %
+
+    Larger  = safer against false pauses, slower to catch a real clog.
+    Smaller = faster reaction, less margin.
+    At 200mm a total clog trips after ~115mm of extrusion (~25s typical).
+
+    If your sensor sits very close to the extruder with little tube between
+    them, drag is smaller and you can lower this. If you still see false
+    pauses, raise it before touching underextrusion_max_rate.
+
+  min_window_samples
+
+    Floor on how many reads must be in the window regardless of distance.
+    Stops a decision being made from two or three readings.
+
+  encoder_scale
+
+    Multiplies every encoder reading. Only for a steady bias you have
+    measured and cannot remove by calibrating the ESP32. Prefer fixing the
+    calibration; this is an escape hatch, not a substitute.
+
+  gain_tolerance
+
+    The module continuously measures the long-run ratio of measured to
+    commanded extrusion (SFS_STATUS -> encoder_gain). If |gain - 1| exceeds
+    this, clog detection DISARMS and prints a warning instead of pausing.
+    A steady gain error is indistinguishable from a partial clog inside a
+    single window, so the module refuses to guess.
+
+===============================================================================
+  DIAGNOSING A LOW encoder_gain
+===============================================================================
+
+  Run SFS_STATUS after a print. encoder_gain should be near 1.000.
+
+  If it is low (encoder reads less than the extruder commanded):
+
+  0. Is encoder_gain NEGATIVE? The encoder is counting backwards -- flip it
+     with SFS_SET DIR=-1 (or DIR=1), then SFS_RESET. This happens if the
+     magnet or its holder is reinstalled the other way up. Calibration is
+     unaffected: the firmware takes the absolute value, so only the sign is
+     wrong.
+
+  1. SFS_DIAG -- check the register dump.
+
+     zpos / mpos / mang non-zero
+         The ANGLE register is being scaled and clipped by the chip. The
+         firmware uses rawAngle() so this no longer matters, but it means
+         someone wrote those registers.
+
+     agc at 0, or at the top of its range
+         Magnet too strong / too weak. Ideal AGC is the MIDDLE of the range:
+         ~64 at 3.3V (range 0-128), ~128 at 5V (range 0-255). Adjust the air
+         gap to 1-2mm. Both extremes degrade angle accuracy.
+
+  2. SFS_AUTO_CALIBRATE TEMP=<your temp> LENGTH=100
+     Then run a print and check encoder_gain again.
+
+  3. If the gain is STILL low after recalibrating, the problem is mechanical:
+     the O-ring is slipping on the filament. Compare the stored deg/mm
+     against the wheel geometry --
+
+         deg_per_mm = 360 / (pi * effective_contact_diameter_mm)
+
+     With the stock ~11mm O-ring that is about 10.4 deg/mm. A stored value
+     far above that means the wheel is turning less than geometry says it
+     should, i.e. it is slipping. Check spring pressure, O-ring wear, and
+     that the filament runs straight through the sensor.
+
+===============================================================================
+  A NOTE ON serial: auto
+===============================================================================
+
+  Auto-detect opens candidate serial ports and writes PING to them. If one of
+  those is a Klipper MCU, that write corrupts its protocol stream and takes
+  the printer down ("Missed scheduling of next digital out event"), which also
+  kills any CAN board bridged through it.
+
+  The module already refuses to probe any port listed in an [mcu] section, but
+  a fixed path is safer and costs nothing:
+
+      ls /dev/serial/by-id/
+      serial: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_XX...
+
+  The by-id path is MAC-based and never changes.
